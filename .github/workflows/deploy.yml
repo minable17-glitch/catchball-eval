@@ -30,8 +30,8 @@ jobs:
           # 이 도구 전용 수파베이스 프로젝트의 값으로 바꿔 주세요 (대시보드 → Project Settings → API).
           # publishable(anon) key 는 공개용으로 설계된 값이라 커밋에 포함해도 됩니다.
           # (실제 접근 제어는 데이터베이스의 RLS 정책과 RPC 가 담당합니다.)
-          VITE_SUPABASE_URL: https://프로젝트ID.supabase.co
-          VITE_SUPABASE_ANON_KEY: sb_publishable_여기에_키
+          VITE_SUPABASE_URL: https://acuyoomltvbqdetssfyl.supabase.co
+          VITE_SUPABASE_ANON_KEY: sb_publishable_-BAZqLqfsniJ701TrnD5KA_nsUn--Hu
       - uses: actions/configure-pages@v5
         with:
           enablement: true # Pages 가 아직 안 켜져 있으면 켜서 진행
