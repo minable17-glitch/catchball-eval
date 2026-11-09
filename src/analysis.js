@@ -320,11 +320,12 @@ export function createTrackletTracker({ linkRadius = 0.06, maxMissed = 5, minLen
       for (const tr of active) {
         const dt = Math.max(1, frame - tr.lastFrame);
         const px = tr.x + tr.vx * dt, py = tr.y + tr.vy * dt;
-        const radius = linkRadius + Math.hypot(tr.vx, tr.vy) * dt * 1.5;
+        const radius = Math.min(0.12, linkRadius + Math.hypot(tr.vx, tr.vy) * dt * 1.5); // 끊긴 뒤 멀리 있는 다른 것(바닥의 다른 공 등)과 이어 붙지 않게 상한
         let best = null, bestD = Infinity;
         candidates.forEach((c, i) => {
           if (taken.has(i)) return;
-          const d = Math.hypot(c.x - px, c.y - py);
+          // 예상 위치(직전 속도로 계속 갔을 때) 또는 마지막 위치 근처(글러브에 맞고 방향이 바뀐 경우) 둘 중 하나에 가까우면 이어 붙임
+          const d = Math.min(Math.hypot(c.x - px, c.y - py), Math.hypot(c.x - tr.x, c.y - tr.y) + 0.02);
           // 크기가 갑자기 4배 넘게 달라지면 다른 물체
           const ratio = tr.area ? Math.max(c.area / tr.area, tr.area / c.area) : 1;
           if (d < radius && d < bestD && ratio < 4) { best = i; bestD = d; }
@@ -529,6 +530,20 @@ function estimateGroundY(track, fallback) {
   return Math.min(0.97, median - 0.03);
 }
 
+// 전환점 근처 프레임들에서 공과 가로로 가장 가까운 사람의 발목 높이로 바닥선을 잡음 (없으면 fallback)
+function localGroundY(track, frame, fallback) {
+  const i = track.indexOf(frame);
+  let best = null, bestD = Infinity;
+  for (let k = Math.max(0, i - 10); k <= Math.min(track.length - 1, i + 10); k++) {
+    for (const person of track[k].people || []) {
+      if (person.ankleY == null || person.cx == null) continue;
+      const d = Math.abs(person.cx - frame.x);
+      if (d < bestD) { bestD = d; best = person.ankleY; }
+    }
+  }
+  return best != null ? Math.min(0.98, best - 0.02) : fallback;
+}
+
 /**
  * 공 궤적에서 "방향이 바뀐 순간"들을 찾아 캐치/실패 이벤트로 만듭니다.
  *
@@ -592,19 +607,48 @@ export function detectEvents(rawTrack, params = {}) {
     const f = tp.frame;
     const next = turning[k + 1]?.frame || visible[visible.length - 1];
     const win = holdWindow(visible, tp.anchor, f, next);
-    const groundFrame = win.find((w) => w.y >= groundY - 0.01); // 공 반지름만큼 여유
-    const bounceFrame = win.find((w) => isBounce(track, w));
+    // 받는 아이의 발목 기준 바닥선 (없으면 전체 기준). 두 아이가 앞뒤로 떨어져 있으면 발목 높이가 달라서 따로 봐야 함
+    const localGround = localGroundY(track, f, groundY);
     const wristDist = wristDistanceNear(track, f, 3);
+    const held = wristDist != null && wristDist <= p.catchRadius;
+    // 공이 도착한 뒤(전환점부터) 어떻게 움직였나: 잡힌 공은 멈추고, 놓친 공은 손에서 튕겨 계속 움직여 바닥으로 감
+    const after = win.filter((w) => w.t >= f.t);
+    let pathAfter = 0, downAfter = 0;
+    for (let i = 1; i < after.length; i++) {
+      pathAfter += Math.hypot(after[i].x - after[i - 1].x, after[i].y - after[i - 1].y);
+      downAfter = Math.max(downAfter, after[i].y - f.y);
+    }
+    const groundIdx = win.findIndex((w) => w.y >= localGround - 0.01); // 공 반지름만큼 여유
+    const groundFrame = groundIdx >= 0 ? win[groundIdx] : null;
+    let movedOnGround = 0, groundFrames = 0;
+    if (groundFrame) {
+      for (let i = groundIdx; i < win.length; i++) {
+        if (win[i].y >= localGround - 0.01) groundFrames++;
+        movedOnGround = Math.max(movedOnGround, Math.hypot(win[i].x - groundFrame.x, win[i].y - groundFrame.y));
+      }
+    }
+    const bounceFrame = win.find((w) => isBounce(track, w));
+    // 손에 닿고도 계속 아래로 흘러감. 손 위치 정보(포즈)가 있을 때만 씀 — 없으면 글러브째 내리는 동작과 구분이 안 됨
+    const deflected = wristDist != null && downAfter >= 0.06 && pathAfter >= 0.08;
+
     let type, confidence, reason, at = f;
-    if (groundFrame || bounceFrame) {
-      type = 'drop';
-      confidence = groundFrame && bounceFrame ? 0.95 : 0.75;
-      reason = bounceFrame ? '공이 바닥에 튐' : '공이 바닥까지 떨어짐';
-      at = groundFrame || bounceFrame; // 실패 시각은 바닥에 닿은 순간으로
+    if (bounceFrame) {
+      type = 'drop'; confidence = 0.95; reason = '공이 바닥에 튐'; at = bounceFrame;
+    } else if (groundFrame && (movedOnGround >= 0.02 || groundFrames >= 3 || !held)) {
+      // 바닥 높이까지 내려가 굴렀거나 머물렀거나 손이 근처에 없었음 → 놓침. (손에 닿았어도 그 뒤 떨어져 구르면 놓친 것)
+      // 바닥 가까이서 손으로 멈추고 바로 다시 올라간 공은 낮게 잡은 것으로 봄
+      type = 'drop'; confidence = movedOnGround >= 0.02 ? 0.9 : 0.75;
+      reason = movedOnGround >= 0.02 ? (held ? '손에 닿은 뒤 바닥에 떨어져 굴러감' : '공이 바닥에 떨어져 굴러감') : '공이 바닥까지 떨어짐'; at = groundFrame;
+    } else if (deflected && (!held || (downAfter >= 0.12 && pathAfter >= 0.15))) {
+      // 손에 안 닿았는데 흘러갔거나, 닿았어도 그 뒤 한참(화면 높이의 12% 이상 아래로) 흘러감 → 놓침.
+      // (잡은 공을 글러브째 허리까지 내리는 정도는 이보다 작음)
+      type = 'drop'; confidence = 0.8; reason = held ? '손에 닿은 뒤 흘러내림' : '공이 손에서 튕겨 나감'; at = after[after.length - 1] || f;
     } else {
       type = 'catch';
-      if (wristDist != null && wristDist <= p.catchRadius) { confidence = 0.95; reason = '손 가까이에서 공이 멈추고 되돌아감'; }
-      else if (wristDist != null) { confidence = 0.6; reason = '공은 되돌아갔지만 손과 거리가 멂'; }
+      if (held && pathAfter < 0.04) { confidence = 0.95; reason = '손 가까이에서 공이 멈춤'; }
+      else if (held) { confidence = 0.85; reason = '손 가까이에서 공이 멈추고 되돌아감'; }
+      else if (groundFrame) { confidence = 0.7; reason = '낮게 받음 (바닥 가까이에서 멈춤)'; }
+      else if (wristDist != null) { confidence = 0.6; reason = '공은 멈췄지만 손과 거리가 멂'; }
       else { confidence = 0.75; reason = '공이 되돌아감 (손 위치 정보 없음)'; }
       if (!tp.confirmed) { confidence = Math.min(confidence, 0.6); reason += ' · 영상 끝부분'; }
     }
@@ -636,11 +680,11 @@ function holdWindow(visible, a, e, n) {
     const f = visible[k];
     if (Math.abs(f.sx - a.sx) >= travelIn * 0.7) out.push(f);
   }
-  const travelOut = Math.abs(n.sx - e.sx);
+  // 도착한 뒤: 다음 전환점 전까지, 최대 1.5초. (손에 닿고 나서 떨어져 구르는 것까지 보려면 거리보다 시간으로 잡아야 함)
   for (let k = ie + 1; k <= inx; k++) {
     const f = visible[k];
-    if (Math.abs(f.sx - e.sx) <= travelOut * 0.3) out.push(f);
-    else break;
+    if (f.t - e.t > 1.5) break;
+    out.push(f);
   }
   return out;
 }
