@@ -1,0 +1,47 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+        env:
+          GH_PAGES_BASE: /${{ github.event.repository.name }}/
+          # 이 도구 전용 수파베이스 프로젝트의 값으로 바꿔 주세요 (대시보드 → Project Settings → API).
+          # publishable(anon) key 는 공개용으로 설계된 값이라 커밋에 포함해도 됩니다.
+          # (실제 접근 제어는 데이터베이스의 RLS 정책과 RPC 가 담당합니다.)
+          VITE_SUPABASE_URL: https://프로젝트ID.supabase.co
+          VITE_SUPABASE_ANON_KEY: sb_publishable_여기에_키
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
