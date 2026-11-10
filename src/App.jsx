@@ -3,7 +3,8 @@ import { DEFAULT_BALL_PARAMS, DEFAULT_EVENT_PARAMS, detectEvents, makeColorMask,
 import { analyzeVideo, previewMask } from './analyzer.js';
 import { loadPoseLandmarker } from './pose.js';
 import { addRecord, deleteRecord, exportRecordsToExcel, loadRecords, todayKST } from './records.js';
-import { deleteSubmission, fetchVideo, getSavedTeacherUsername, listResults, listSubmissions, saveResult, teacherLogin, teacherLogout, teacherMe, teacherSignup } from './api.js';
+import { deleteSubmission, fetchVideo, getSavedTeacherUsername, listLabelCounts, listResults, listSubmissions, saveResult, teacherLogin, teacherLogout, teacherMe, teacherSignup } from './api.js';
+import Label from './Label.jsx';
 
 const FPS_OPTIONS = [
   { value: 10, label: '빠르게 (초당 10장)' },
@@ -78,6 +79,8 @@ export default function App() {
   const [loginMsg, setLoginMsg] = useState('');
   const [submissions, setSubmissions] = useState([]);
   const [sheetResults, setSheetResults] = useState([]);
+  const [labelCounts, setLabelCounts] = useState({}); // submissionId → {n, nPresent}
+  const [labeling, setLabeling] = useState(null); // 공 표시 중인 제출물
   const [fetchingId, setFetchingId] = useState(null);
   const [currentSubmissionId, setCurrentSubmissionId] = useState(null);
   const apiReady = !!teacher;
@@ -103,9 +106,10 @@ export default function App() {
 
   // ── 선생님 로그인 / 제출 목록 ──
   const refreshFromServer = useCallback(async () => {
-    const [subs, res] = await Promise.all([listSubmissions(), listResults()]);
+    const [subs, res, counts] = await Promise.all([listSubmissions(), listResults(), listLabelCounts().catch(() => ({}))]);
     setSubmissions(subs);
     setSheetResults(res);
+    setLabelCounts(counts || {});
   }, []);
 
   // 페이지를 열 때 이미 로그인된 선생님이 있으면 그대로 이어감
@@ -649,7 +653,7 @@ export default function App() {
       {/* 제출된 영상 (로그인 시) */}
       {apiReady && (
         <section className="cb-card">
-          <h2>📥 학생이 제출한 영상 <span className="cb-sub">{submissions.length}건</span>
+          <h2>📥 학생이 제출한 영상 <span className="cb-sub">{submissions.length}건 · "공 표시"로 학습 자료를 모읍니다</span>
             <button type="button" className="cb-link" style={{ padding: 0, marginLeft: 'auto' }} onClick={() => refreshFromServer().catch((e) => setToast(e?.message || '새로고침 실패'))}>새로고침</button>
           </h2>
           {submissions.length === 0 ? (
@@ -665,12 +669,19 @@ export default function App() {
                   </div>
                   <div className="cb-row" style={{ margin: 0 }}>
                     <button type="button" className="cb-btn" onClick={() => gradeSubmission(it)} disabled={busy || fetchingId != null}>{fetchingId === it.id ? '가져오는 중...' : it.status === '채점완료' ? '다시 채점' : '채점'}</button>
+                    <button type="button" className="cb-btn ghost" onClick={() => setLabeling(it)} disabled={busy} title="학습 자료 만들기">{labelCounts[it.id]?.n ? `공 표시 ${labelCounts[it.id].n}장면` : '공 표시'}</button>
                     <button type="button" className="cb-x" title="영상 지우기" onClick={() => removeSubmission(it)}>✕</button>
                   </div>
                 </li>
               ))}
             </ul>
           )}
+        </section>
+      )}
+
+      {labeling && (
+        <section className="cb-card">
+          <Label submission={labeling} onClose={() => setLabeling(null)} onSaved={() => refreshFromServer().catch(() => {})} />
         </section>
       )}
 

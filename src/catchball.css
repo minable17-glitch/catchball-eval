@@ -139,3 +139,9 @@ input[type="range"] { width: 100%; accent-color: var(--cb-accent-dark); }
 .cb-calib-body { display: flex; gap: 10px; align-items: flex-start; }
 .cb-calib-body .cb-calib-msg { flex: 1; min-width: 0; }
 .cb-calib-mag { width: 90px; height: 90px; border-radius: 8px; border: 1px solid var(--cb-line); background: #000; flex: none; image-rendering: pixelated; }
+
+/* 공 표시 도구 */
+.cb-label { display: flex; flex-direction: column; gap: 10px; }
+.cb-label .cb-video-wrap { margin-top: 0; }
+.cb-label-bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.cb-label-time { font-variant-numeric: tabular-nums; min-width: 110px; font-weight: 600; }

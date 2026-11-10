@@ -185,3 +185,26 @@ export async function deleteSubmission(item) {
     if (error) throw new Error('기록은 지웠지만 영상 파일 삭제에 실패했습니다: ' + error.message);
   }
 }
+
+// ── 공 위치 표시 (학습 자료) ──
+
+export async function listLabelCounts() {
+  const rows = (await rpc('catchball_label_counts')) || [];
+  const map = {};
+  for (const r of rows) map[r.submission_id] = { n: r.n, nPresent: r.n_present };
+  return map;
+}
+
+export async function listLabels(submissionId) {
+  const rows = (await rpc('catchball_list_labels', { p_submission_id: submissionId })) || [];
+  return rows.map((r) => ({ t: Number(r.t), present: !!r.present, x: r.x, y: r.y, r: r.r }));
+}
+
+// labels: [{t, present, x, y, r}]
+export async function saveLabels(submissionId, labels) {
+  return rpc('catchball_save_labels', { p_submission_id: submissionId, p_labels: labels });
+}
+
+export async function deleteLabels(submissionId) {
+  return rpc('catchball_delete_labels', { p_submission_id: submissionId });
+}
