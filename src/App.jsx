@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { DEFAULT_BALL_PARAMS, DEFAULT_EVENT_PARAMS, detectEvents, makeColorMask, summarize } from './analysis.js';
+import { DEFAULT_BALL_PARAMS, DEFAULT_EVENT_PARAMS, detectEvents, makeColorMask, sampleBallParams, summarize } from './analysis.js';
 import { analyzeVideo, previewMask } from './analyzer.js';
 import { loadPoseLandmarker } from './pose.js';
 import { addRecord, deleteRecord, exportRecordsToExcel, loadRecords, todayKST } from './records.js';
@@ -50,6 +50,11 @@ export default function App() {
   const [usePose, setUsePose] = useState(true);
   const [ballParams, setBallParams] = useState({ ...DEFAULT_BALL_PARAMS });
   const [minTravel, setMinTravel] = useState(DEFAULT_EVENT_PARAMS.minTravel);
+  // ── 기준 찍기 (채점자가 첫 장면에서 공·두 아이 발을 눌러 줌) ──
+  const [calib, setCalib] = useState({ ball: null, params: null, players: [] }); // ball: {x,y}, players: [{x, footY}]
+  const [calibStep, setCalibStep] = useState(0); // 0 공, 1 왼쪽 아이 발, 2 오른쪽 아이 발, 3 끝
+  const [calibMsg, setCalibMsg] = useState('');
+  const [calibTime, setCalibTime] = useState(0.5);
   const [showSettings, setShowSettings] = useState(false);
   const [maskPreview, setMaskPreview] = useState(null); // { url, found }
   // ── 분석 상태 ──
@@ -218,6 +223,29 @@ export default function App() {
     }
   }, []);
 
+  // 기준 찍기 중: 찍은 자리 표시
+  useEffect(() => {
+    if (status !== 'calibrate') return;
+    const canvas = overlayRef.current, video = videoRef.current;
+    if (!canvas || !video?.videoWidth) return;
+    if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) { canvas.width = video.videoWidth; canvas.height = video.videoHeight; }
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height, lw = Math.max(2, W / 320);
+    ctx.clearRect(0, 0, W, H);
+    ctx.font = `bold ${Math.round(W / 40)}px sans-serif`; ctx.textAlign = 'center';
+    if (calib.ball) {
+      ctx.strokeStyle = '#ff3b30'; ctx.lineWidth = lw * 1.5;
+      ctx.beginPath(); ctx.arc(calib.ball.x * W, calib.ball.y * H, lw * 6, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = '#ff3b30'; ctx.fillText('공', calib.ball.x * W, calib.ball.y * H - lw * 8);
+    }
+    calib.players.forEach((pl, i) => {
+      ctx.strokeStyle = '#00c8ff'; ctx.lineWidth = lw * 1.5;
+      ctx.beginPath(); ctx.moveTo(pl.x * W - lw * 8, pl.footY * H); ctx.lineTo(pl.x * W + lw * 8, pl.footY * H); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(pl.x * W, pl.footY * H - lw * 8); ctx.lineTo(pl.x * W, pl.footY * H); ctx.stroke();
+      ctx.fillStyle = '#00c8ff'; ctx.fillText(i === 0 ? '왼쪽 아이' : '오른쪽 아이', pl.x * W, pl.footY * H + lw * 10);
+    });
+  }, [status, calib]);
+
   // 분석이 끝난 뒤: 영상 재생 위치에 맞춰 오버레이 표시
   useEffect(() => {
     if (status !== 'done' || !track) return;
@@ -252,13 +280,54 @@ export default function App() {
     setStatus('loading');
   };
 
-  // 영상 메타데이터가 읽히면 바로 채점 시작
-  const onLoadedMetadata = () => {
+  // 영상 메타데이터가 읽히면 '기준 찍기' 단계로 (공·아이 발을 눌러 주면 훨씬 정확해짐)
+  const onLoadedMetadata = async () => {
     const video = videoRef.current;
     if (!video) return;
+    await ensureDuration(video);
     setDuration(video.duration);
-    if (status === 'loading') startAnalysis();
+    if (status === 'loading') {
+      setCalib({ ball: null, params: null, players: [] }); setCalibStep(0); setCalibMsg('');
+      const t0 = Math.min(0.5, Math.max(0, video.duration - 0.1));
+      setCalibTime(t0);
+      video.currentTime = t0;
+      setStatus('calibrate');
+    }
   };
+
+  // 기준 찍기: 화면을 누른 위치를 0~1 좌표로
+  const onOverlayClick = (e) => {
+    if (status !== 'calibrate') return;
+    const video = videoRef.current, canvas = overlayRef.current;
+    if (!video?.videoWidth || !canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    // object-fit: contain 으로 그려진 영상의 실제 영역 계산
+    const scale = Math.min(rect.width / video.videoWidth, rect.height / video.videoHeight);
+    const dw = video.videoWidth * scale, dh = video.videoHeight * scale;
+    const ox = (rect.width - dw) / 2, oy = (rect.height - dh) / 2;
+    const nx = (e.clientX - rect.left - ox) / dw, ny = (e.clientY - rect.top - oy) / dh;
+    if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return;
+    if (calibStep === 0) {
+      const w = 960, h = Math.round(video.videoHeight * w / video.videoWidth);
+      const c = document.createElement('canvas'); c.width = w; c.height = h;
+      const ctx = c.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(video, 0, 0, w, h);
+      const params = sampleBallParams(ctx.getImageData(0, 0, w, h).data, w, h, nx, ny);
+      if (!params) { setCalibMsg('그 자리에서 공 색을 못 잡았어요. 공의 한가운데를 다시 눌러 주세요. (공이 안 보이는 장면이면 아래 막대로 장면을 옮기세요)'); return; }
+      setCalib((c0) => ({ ...c0, ball: { x: nx, y: ny }, params }));
+      setBallParams({ ...DEFAULT_BALL_PARAMS, ...params });
+      setCalibMsg(`공 색을 잡았어요 (색상 ${params.sample.h}, 크기 ${params.sample.area}px). 이제 왼쪽 아이의 발을 눌러 주세요.`);
+      setCalibStep(1);
+    } else if (calibStep === 1 || calibStep === 2) {
+      setCalib((c0) => ({ ...c0, players: [...c0.players, { x: nx, footY: ny }] }));
+      setCalibMsg(calibStep === 1 ? '이제 오른쪽 아이의 발을 눌러 주세요.' : '다 찍었어요. "채점 시작"을 눌러 주세요.');
+      setCalibStep(calibStep + 1);
+    }
+  };
+
+  const seekCalib = (t) => { setCalibTime(t); const v = videoRef.current; if (v) v.currentTime = t; };
+  const resetCalib = () => { setCalib({ ball: null, params: null, players: [] }); setCalibStep(0); setCalibMsg(''); setBallParams({ ...DEFAULT_BALL_PARAMS }); };
+  const openCalib = () => { const v = videoRef.current; if (!v) return; if (abortRef.current) abortRef.current.abort(); v.pause(); setCalibTime(v.currentTime); setStatus('calibrate'); };
 
   const startAnalysis = async () => {
     const video = videoRef.current;
@@ -310,9 +379,9 @@ export default function App() {
       if (controller.signal.aborted) return;
       const found = result.filter((f) => f.found).length;
       setFoundRatio(frameCount ? found / frameCount : 0);
-      const { events: evs, groundY: g } = detectEvents(result, { minTravel });
+      const { events: evs, groundY: g } = detectEvents(result, { minTravel, players: calib.players });
       setTrack(result); setEvents(evs); setGroundY(g);
-      window.__catchballDebug = { track: result, events: evs, groundY: g }; // 문제 확인용 (콘솔에서 볼 수 있음)
+      window.__catchballDebug = { track: result, events: evs, groundY: g, calib }; // 문제 확인용 (콘솔에서 볼 수 있음)
       setStatus('done');
       video.currentTime = 0;
     } catch (e) {
@@ -328,7 +397,7 @@ export default function App() {
   // 판정 기준(최소 던지기 거리)만 바뀐 경우: 영상 다시 안 보고 바로 재계산
   const reapplyEvents = (nextMinTravel) => {
     if (!track) return;
-    const { events: evs, groundY: g } = detectEvents(track, { minTravel: nextMinTravel });
+    const { events: evs, groundY: g } = detectEvents(track, { minTravel: nextMinTravel, players: calib.players });
     setEvents(evs); setGroundY(g);
   };
 
@@ -476,7 +545,7 @@ export default function App() {
         {videoUrl && (
           <div className="cb-video-wrap">
             <video ref={videoRef} src={videoUrl} controls={status === 'done'} playsInline muted preload="auto" onLoadedMetadata={onLoadedMetadata} onError={() => { setErrorMsg('이 영상은 브라우저가 재생하지 못합니다. mp4(H.264)로 변환해서 다시 올려 주세요.'); setStatus('error'); }} />
-            <canvas ref={overlayRef} className="cb-overlay" />
+            <canvas ref={overlayRef} className={`cb-overlay ${status === 'calibrate' ? 'clickable' : ''}`} onClick={onOverlayClick} />
             {busy && (
               <div className="cb-progress">
                 <div className="cb-progress-bar"><div style={{ width: `${status === 'analyzing' ? pct : 0}%` }} /></div>
@@ -490,6 +559,22 @@ export default function App() {
             )}
           </div>
         )}
+        {status === 'calibrate' && (
+              <div className="cb-calib">
+                <div className="cb-calib-steps">
+                  <span className={calibStep === 0 ? 'on' : calibStep > 0 ? 'ok' : ''}>① 공 누르기</span>
+                  <span className={calibStep === 1 ? 'on' : calibStep > 1 ? 'ok' : ''}>② 왼쪽 아이 발</span>
+                  <span className={calibStep === 2 ? 'on' : calibStep > 2 ? 'ok' : ''}>③ 오른쪽 아이 발</span>
+                </div>
+                <div className="cb-calib-msg">{calibMsg || '영상 위에서 공의 한가운데를 눌러 주세요. 공이 안 보이면 아래 막대로 공이 보이는 장면을 찾으세요.'}</div>
+                <input type="range" min="0" max={Math.max(0.1, (duration || 1) - 0.05)} step="0.1" value={calibTime} onChange={(e) => seekCalib(Number(e.target.value))} aria-label="장면 고르기" />
+                <div className="cb-row" style={{ margin: 0 }}>
+                  <button type="button" className="cb-btn" onClick={startAnalysis}>{calibStep === 0 ? '찍지 않고 자동으로 채점 시작' : '채점 시작'}</button>
+                  {calibStep === 0 && <button type="button" className="cb-btn ghost" onClick={() => { setCalibStep(1); setCalibMsg('공은 자동으로 찾습니다. 왼쪽 아이의 발을 눌러 주세요.'); }}>공은 건너뛰고 아이만 찍기</button>}
+                  <button type="button" className="cb-btn ghost" onClick={resetCalib} disabled={calibStep === 0}>다시 찍기</button>
+                </div>
+              </div>
+            )}
         {poseNote && <p className="cb-note">ℹ️ {poseNote}</p>}
         {errorMsg && <p className="cb-error">⚠️ {errorMsg}</p>}
         {status === 'done' && foundRatio != null && foundRatio < 0.3 && (
@@ -527,7 +612,10 @@ export default function App() {
                 <small>두 아이가 화면에서 멀리 떨어져 있으면 높이고, 가까우면 낮추세요. 영상 분석 없이 바로 다시 계산됩니다.</small>
               </label>
             </div>
-            <button type="button" className="cb-btn" onClick={startAnalysis} disabled={!videoUrl || busy}>바뀐 설정으로 다시 채점</button>
+            <div className="cb-row">
+              <button type="button" className="cb-btn" onClick={startAnalysis} disabled={!videoUrl || busy}>바뀐 설정으로 다시 채점</button>
+              <button type="button" className="cb-btn ghost" onClick={openCalib} disabled={!videoUrl || busy}>공·아이 위치 다시 찍기</button>
+            </div>
 
           </div>
         )}

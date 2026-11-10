@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { submitVideo } from '../api.js';
 import { canRecord, createLiveAnalyzer, createRecorder, drawLiveOverlay, openCamera, stopStream } from '../live.js';
 import { loadPoseLandmarker } from '../pose.js';
-import { DEFAULT_BALL_PARAMS } from '../analysis.js';
+import { DEFAULT_BALL_PARAMS, sampleBallParams } from '../analysis.js';
 
 const MB = 1024 * 1024;
 
@@ -18,6 +18,8 @@ export default function LiveCapture({ info, validate, onDone }) {
   const [progress, setProgress] = useState(0);
   const [live, setLive] = useState({ stats: { success: 0, fail: 0, bestStreak: 0 }, t: 0, poseMs: 0, poseOn: false });
   const [result, setResult] = useState(null);
+  const [ballParams, setBallParams] = useState({ ...DEFAULT_BALL_PARAMS });
+  const [ballPicked, setBallPicked] = useState(false);
   const videoRef = useRef(null);
   const overlayRef = useRef(null);
   const streamRef = useRef(null);
@@ -66,7 +68,7 @@ export default function LiveCapture({ info, validate, onDone }) {
     const analyzer = createLiveAnalyzer({
       video: v,
       fps: 15,
-      ballParams: DEFAULT_BALL_PARAMS,
+      ballParams,
       poseLandmarker: poseRef.current,
       onUpdate: ({ frame, recent, stats, events, groundY, poseMs, t }) => {
         const latest = events[events.length - 1];
@@ -144,6 +146,27 @@ export default function LiveCapture({ info, validate, onDone }) {
     }
   };
 
+  // 촬영 전 미리보기에서 공을 누르면 그 색으로 기준을 잡음 (조명·공 색이 달라도 정확해짐)
+  const onPreviewClick = (e) => {
+    if (phase !== 'ready') return;
+    const v = videoRef.current, canvas = overlayRef.current;
+    if (!v?.videoWidth || !canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const scale = Math.min(rect.width / v.videoWidth, rect.height / v.videoHeight);
+    const dw = v.videoWidth * scale, dh = v.videoHeight * scale;
+    const nx = (e.clientX - rect.left - (rect.width - dw) / 2) / dw, ny = (e.clientY - rect.top - (rect.height - dh) / 2) / dh;
+    if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return;
+    const w = 960, h = Math.round(v.videoHeight * w / v.videoWidth);
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(v, 0, 0, w, h);
+    const params = sampleBallParams(ctx.getImageData(0, 0, w, h).data, w, h, nx, ny);
+    if (!params) { setMessage('그 자리에서 공 색을 못 잡았어요. 공의 한가운데를 다시 눌러 주세요.'); return; }
+    setBallParams({ ...DEFAULT_BALL_PARAMS, ...params });
+    setBallPicked(true);
+    setMessage(`공 색을 잡았어요 (색상 ${params.sample.h}). 이제 촬영을 시작하세요.`);
+  };
+
   if (!canRecord()) {
     return <p className="cb-error">이 브라우저는 앱 안 촬영을 지원하지 않습니다. "찍어 둔 영상 올리기"를 이용해 주세요.</p>;
   }
@@ -152,7 +175,7 @@ export default function LiveCapture({ info, validate, onDone }) {
     <div className="cb-live">
       <div className={`cb-video-wrap ${phase === 'idle' || phase === 'opening' ? 'is-hidden' : ''}`}>
         <video ref={videoRef} playsInline muted autoPlay />
-        <canvas ref={overlayRef} className="cb-overlay" />
+        <canvas ref={overlayRef} className={`cb-overlay ${phase === 'ready' ? 'clickable' : ''}`} onClick={onPreviewClick} />
         {phase === 'recording' && (
           <div className="cb-rec-badge"><span className="dot" /> 촬영 중 {fmt(live.t)}{live.poseOn ? '' : ' · 공만 인식'}</div>
         )}
@@ -164,7 +187,7 @@ export default function LiveCapture({ info, validate, onDone }) {
       {phase === 'opening' && <p className="cb-note">카메라와 인식 모델을 준비하는 중... (처음 한 번은 몇 초 걸립니다)</p>}
       {phase === 'ready' && (
         <>
-          <p className="cb-note">두 사람이 옆모습으로 화면에 다 들어오게 휴대폰을 고정하고, 준비되면 촬영을 시작하세요. 화면에 공(빨간 원)과 손(하늘색 점)이 표시되면 잘 잡히는 겁니다.</p>
+          <p className="cb-note">두 사람이 옆모습으로 화면에 다 들어오게 휴대폰을 고정하세요. <b>화면 속 공을 한 번 눌러</b> 공 색을 알려 주면 더 정확합니다{ballPicked ? ' (잡았어요 ✅)' : ''}. 준비되면 촬영을 시작하세요.</p>
           <button type="button" className="cb-btn big" onClick={startRecording}>⏺ 촬영 시작</button>
         </>
       )}

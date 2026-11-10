@@ -259,6 +259,52 @@ export function pickBall(blobs, width, height, p = DEFAULT_BALL_PARAMS, prev = n
   return best;
 }
 
+// 채점자가 화면에서 공을 눌렀을 때: 그 자리 주변 픽셀의 색과 크기로 공 색 기준값을 만듦.
+// (nx, ny: 0~1 좌표) 반환: 기준값 객체 또는 null(그 자리에 색이 뚜렷한 덩어리가 없음)
+export function sampleBallParams(data, width, height, nx, ny, radiusPx = 12) {
+  const cx = Math.round(nx * width), cy = Math.round(ny * height);
+  const med = (arr) => { const a = arr.slice().sort((p, q) => p - q); return a[Math.floor(a.length / 2)]; };
+  const hueDiff = (a, b) => { const d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; };
+  // 1) 누른 자리 바로 주변(반지름 3px)의 색으로 '공 색'을 정함 (주변 잔디·흙이 섞이지 않게)
+  const core = [];
+  for (let y = Math.max(0, cy - 3); y <= Math.min(height - 1, cy + 3); y++) {
+    for (let x = Math.max(0, cx - 3); x <= Math.min(width - 1, cx + 3); x++) {
+      const j = (y * width + x) * 4;
+      const [h, sat, v] = rgbToHsv(data[j], data[j + 1], data[j + 2]);
+      if (sat >= 0.25 && v >= 0.3) core.push(h);
+    }
+  }
+  if (core.length < 6) return null;
+  const h0 = med(core);
+  // 2) 더 넓은 범위에서 그 색과 비슷한(±25도) 픽셀만 모음
+  const hs = [], ss = [], vs = [];
+  for (let y = Math.max(0, cy - radiusPx); y <= Math.min(height - 1, cy + radiusPx); y++) {
+    for (let x = Math.max(0, cx - radiusPx); x <= Math.min(width - 1, cx + radiusPx); x++) {
+      if ((x - cx) ** 2 + (y - cy) ** 2 > radiusPx * radiusPx) continue;
+      const j = (y * width + x) * 4;
+      const [h, sat, v] = rgbToHsv(data[j], data[j + 1], data[j + 2]);
+      if (sat >= 0.25 && v >= 0.3 && hueDiff(h, h0) <= 25) { hs.push(h); ss.push(sat); vs.push(v); }
+    }
+  }
+  if (hs.length < 6) return null;
+  // 색상은 원형이라 평균 대신 중앙값(각도 보정)으로
+  const hsAdj = hs.map((h) => (h - h0 > 180 ? h - 360 : h0 - h > 180 ? h + 360 : h));
+  const h = (med(hsAdj) + 360) % 360, sat = med(ss), v = med(vs);
+  const params = {
+    hueMin: (h - 18 + 360) % 360, hueMax: (h + 18) % 360,
+    satMin: Math.max(0.2, Math.round(sat * 0.6 * 100) / 100),
+    valMin: Math.max(0.25, Math.round(v * 0.5 * 100) / 100),
+    minArea: 3,
+    maxAreaFrac: Math.min(0.02, Math.max(0.004, (hs.length * 6) / (width * height))),
+  };
+  // 찍은 자리에서 실제로 덩어리가 잡히는지 확인해 크기 정보를 덧붙임
+  const mask = makeColorMask(data, width, height, params);
+  const blobs = findBlobs(mask, width, height, { minArea: 2 });
+  let best = null;
+  for (const b of blobs) { const d = Math.hypot(b.cx - cx, b.cy - cy); if (d < radiusPx * 1.5 && (!best || b.area > best.area)) best = b; }
+  return { ...params, sample: { h: Math.round(h), s: Math.round(sat * 100) / 100, v: Math.round(v * 100) / 100, area: best ? best.area : hs.length } };
+}
+
 // 한 프레임의 공 후보 전부 (색·크기·모양 기준 통과, 고정물 제외). 0~1 좌표. 모양 점수 높은 순.
 export function detectBallCandidates(data, width, height, params = DEFAULT_BALL_PARAMS, staticMap = null, maxCount = 40) {
   const p = { ...DEFAULT_BALL_PARAMS, ...params };
@@ -531,7 +577,7 @@ function estimateGroundY(track, fallback) {
 }
 
 // 전환점 근처 프레임들에서 공과 가로로 가장 가까운 사람의 발목 높이로 바닥선을 잡음 (없으면 fallback)
-function localGroundY(track, frame, fallback) {
+function localGroundY(track, frame, fallback, players = null) {
   const i = track.indexOf(frame);
   let best = null, bestD = Infinity;
   for (let k = Math.max(0, i - 10); k <= Math.min(track.length - 1, i + 10); k++) {
@@ -541,7 +587,18 @@ function localGroundY(track, frame, fallback) {
       if (d < bestD) { bestD = d; best = person.ankleY; }
     }
   }
+  if (best == null && players?.length) {
+    // 채점자가 찍어 준 아이 발 위치 (포즈가 안 잡힐 때)
+    const near = players.reduce((a, pl) => (Math.abs(pl.x - frame.x) < Math.abs(a.x - frame.x) ? pl : a));
+    best = near.footY;
+  }
   return best != null ? Math.min(0.98, best - 0.02) : fallback;
+}
+
+// 채점자가 찍어 준 아이 위치 기준으로 '아이 몸 근처'인지 (포즈가 없을 때 손 근처 대용)
+function nearPlayer(frame, players) {
+  if (!players?.length) return null;
+  return players.some((pl) => Math.abs(pl.x - frame.x) <= 0.12 && frame.y >= pl.footY - 0.5 && frame.y <= pl.footY);
 }
 
 /**
@@ -552,8 +609,9 @@ function localGroundY(track, frame, fallback) {
  */
 export function detectEvents(rawTrack, params = {}) {
   const p = { ...DEFAULT_EVENT_PARAMS, ...params };
+  const players = Array.isArray(p.players) && p.players.length ? p.players : null; // 채점자가 찍은 [{x, footY}]
   const track = smoothX(interpolateGaps(rawTrack, p.maxGapFrames));
-  const groundY = estimateGroundY(track, p.groundY);
+  const groundY = estimateGroundY(track, players ? Math.min(...players.map((pl) => pl.footY)) - 0.02 : p.groundY);
   const visible = track.filter((f) => f.found);
   const events = [];
   if (visible.length < 3) return { events, groundY, stats: summarize(events) };
@@ -608,9 +666,12 @@ export function detectEvents(rawTrack, params = {}) {
     const next = turning[k + 1]?.frame || visible[visible.length - 1];
     const win = holdWindow(visible, tp.anchor, f, next);
     // 받는 아이의 발목 기준 바닥선 (없으면 전체 기준). 두 아이가 앞뒤로 떨어져 있으면 발목 높이가 달라서 따로 봐야 함
-    const localGround = localGroundY(track, f, groundY);
+    const localGround = localGroundY(track, f, groundY, players);
     const wristDist = wristDistanceNear(track, f, 3);
-    const held = wristDist != null && wristDist <= p.catchRadius;
+    const nearP = nearPlayer(f, players);
+    const held = wristDist != null ? wristDist <= p.catchRadius : nearP === true;
+    // 찍어 준 아이 위치가 있는데 둘 다에서 멀리 떨어진 곳의 '멈춤'은 공이 아닌 것(낙엽 등)일 가능성이 큼 → 바닥에 닿은 경우가 아니면 무시
+    const farFromPlayers = players && players.length >= 2 ? players.every((pl) => Math.abs(pl.x - f.x) > 0.35) : false;
     // 공이 도착한 뒤(전환점부터) 어떻게 움직였나: 잡힌 공은 멈추고, 놓친 공은 손에서 튕겨 계속 움직여 바닥으로 감
     const after = win.filter((w) => w.t >= f.t);
     let pathAfter = 0, downAfter = 0;
@@ -643,9 +704,12 @@ export function detectEvents(rawTrack, params = {}) {
       // 손에 안 닿았는데 흘러갔거나, 닿았어도 그 뒤 한참(화면 높이의 12% 이상 아래로) 흘러감 → 놓침.
       // (잡은 공을 글러브째 허리까지 내리는 정도는 이보다 작음)
       type = 'drop'; confidence = 0.8; reason = held ? '손에 닿은 뒤 흘러내림' : '공이 손에서 튕겨 나감'; at = after[after.length - 1] || f;
+    } else if (farFromPlayers) {
+      return; // 아이들에게서 먼 곳에서 멈춘 것은 이벤트로 치지 않음
     } else {
       type = 'catch';
-      if (held && pathAfter < 0.04) { confidence = 0.95; reason = '손 가까이에서 공이 멈춤'; }
+      if (held && wristDist == null) { confidence = 0.8; reason = '아이 몸 근처에서 공이 멈춤'; }
+      else if (held && pathAfter < 0.04) { confidence = 0.95; reason = '손 가까이에서 공이 멈춤'; }
       else if (held) { confidence = 0.85; reason = '손 가까이에서 공이 멈추고 되돌아감'; }
       else if (groundFrame) { confidence = 0.7; reason = '낮게 받음 (바닥 가까이에서 멈춤)'; }
       else if (wristDist != null) { confidence = 0.6; reason = '공은 멈췄지만 손과 거리가 멂'; }
