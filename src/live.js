@@ -1,5 +1,5 @@
 // 앱 안에서 촬영하면서 실시간으로 공·손(글러브)·발목을 인식하고 캐치 횟수를 세는 부분
-import { createCameraMotion, createStaticMap, createTrackletTracker, DEFAULT_BALL_PARAMS, detectBallCandidates, detectEvents, summarize } from './analysis.js';
+import { createCameraMotion, createMotionMap, createStaticMap, createTrackletTracker, createTrackWriter, DEFAULT_BALL_PARAMS, detectBallCandidates, detectEvents, playBandMaxY, summarize } from './analysis.js';
 import { extractPeople } from './pose.js';
 
 export const LIVE_WIDTH = 960; // 멀리 있는 작은 공을 잡으려면 이 정도 필요 (휴대폰에서도 색 검출은 충분히 빠름)
@@ -60,12 +60,14 @@ export function createRecorder(stream, { bitsPerSecond = 1_500_000 } = {}) {
 export function createLiveAnalyzer({ video, fps = 15, ballParams = DEFAULT_BALL_PARAMS, poseLandmarker = null, eventParams = {}, onUpdate }) {
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  const staticMap = createStaticMap({ staticFrames: Math.round(fps * 3) });
+  const staticMap = createStaticMap({ staticFrames: Math.round(fps * 1.5) });
   const camera = createCameraMotion();
+  const motion = createMotionMap();
   const track = [];
-  const tracker = createTrackletTracker({
-    onConfirm: (points) => { for (const pt of points) { const f = track[pt.frame]; if (f && !f.found) { f.x = pt.x; f.y = pt.y; f.r = pt.r; f.found = true; } } },
-  });
+  const recentAnkles = [];
+  let lastMaxY = 1;
+  const writer = createTrackWriter(track, () => lastMaxY);
+  const tracker = createTrackletTracker({ onConfirm: (points, stats) => writer.confirm(points, stats) });
   const recent = [];
   let t0 = 0, running = false, rafId = 0, lastTick = 0, lastEval = 0, lastPoseTs = -1, poseMs = 0, lastPoseEnd = 0;
   let events = [], groundY = null, stats = summarize([]);
@@ -84,9 +86,6 @@ export function createLiveAnalyzer({ video, fps = 15, ballParams = DEFAULT_BALL_
     const t = (now - t0) / 1000;
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const candidates = detectBallCandidates(img.data, canvas.width, canvas.height, ballParams, staticMap);
-    const ball = tracker.update(candidates, t, track.length, camera.update(img.data, canvas.width, canvas.height));
-
     let people;
     // 포즈(손목·발목) 인식은 느린 기기에서 화면을 멈추게 하므로, 한 번 걸린 시간의 3배는 쉬고 다시 돌림
     // (포즈가 전체 시간의 1/4 이상 차지하지 않게). 공 추적은 매 프레임 그대로.
@@ -103,8 +102,17 @@ export function createLiveAnalyzer({ video, fps = 15, ballParams = DEFAULT_BALL_
       people = prev?.people; // 직전 결과를 잠시 재사용
     }
 
-    const frame = { t, x: ball?.x ?? null, y: ball?.y ?? null, r: ball?.r ?? null, found: !!ball, people: people || undefined };
+    for (const p of people || []) if (p.ankleY != null) { recentAnkles.push(p.ankleY); if (recentAnkles.length > 60) recentAnkles.shift(); }
+    const maxY = playBandMaxY({ people, recentAnkles });
+    lastMaxY = maxY;
+    const cam = camera.update(img.data, canvas.width, canvas.height);
+    const diff = motion.update(img.data, canvas.width, canvas.height, cam);
+    const candidates = detectBallCandidates(img.data, canvas.width, canvas.height, ballParams, staticMap, 80, cam, maxY, diff);
+    const ball = tracker.update(candidates, t, track.length, cam, maxY);
+
+    const frame = { t, x: null, y: null, r: null, found: false, people: people || undefined };
     track.push(frame);
+    writer.frame(track.length - 1, frame, ball);
     if (ball) { recent.push({ x: ball.x, y: ball.y }); if (recent.length > 8) recent.shift(); }
 
     if (now - lastEval > 500) {

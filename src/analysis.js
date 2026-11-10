@@ -180,19 +180,28 @@ export function createCameraMotion({ scale = 8, search = 5 } = {}) {
 }
 
 // 직전 프레임과의 밝기 차이(픽셀마다 0~255). 첫 프레임은 차이를 모르므로 모두 255(움직임 있음)로 둠
+// camera: {dx, dy} (0~1 단위, 이 프레임에서 화면이 밀린 양). 있으면 직전 프레임을 그만큼 옮겨서 비교해 카메라 움직임을 뺌
 export function createMotionMap() {
   let prevGray = null;
   let diff = null;
   return {
-    update(data, width, height) {
+    update(data, width, height, camera = null) {
       const n = width * height;
-      if (!prevGray || prevGray.length !== n) { prevGray = new Uint8Array(n); diff = new Uint8Array(n); diff.fill(255); for (let i = 0, j = 0; i < n; i++, j += 4) prevGray[i] = (data[j] * 3 + data[j + 1] * 6 + data[j + 2]) / 10; return diff; }
-      for (let i = 0, j = 0; i < n; i++, j += 4) {
-        const g = (data[j] * 3 + data[j + 1] * 6 + data[j + 2]) / 10;
-        const d = g - prevGray[i];
-        diff[i] = d < 0 ? -d : d;
-        prevGray[i] = g;
+      const cur = new Uint8Array(n);
+      for (let i = 0, j = 0; i < n; i++, j += 4) cur[i] = (data[j] * 3 + data[j + 1] * 6 + data[j + 2]) / 10;
+      if (!prevGray || prevGray.length !== n) { prevGray = cur; diff = new Uint8Array(n); diff.fill(255); return diff; }
+      const sx = camera ? Math.round(camera.dx * width) : 0, sy = camera ? Math.round(camera.dy * height) : 0;
+      for (let y = 0; y < height; y++) {
+        const py = y - sy;
+        for (let x = 0; x < width; x++) {
+          const px = x - sx;
+          const i = y * width + x;
+          if (py < 0 || py >= height || px < 0 || px >= width) { diff[i] = 0; continue; }
+          const d = cur[i] - prevGray[py * width + px];
+          diff[i] = d < 0 ? -d : d;
+        }
       }
+      prevGray = cur;
       return diff;
     },
     reset() { prevGray = null; },
@@ -205,7 +214,9 @@ export function createStaticMap({ cols = 24, rows = 14, staticFrames = 45 } = {}
   const persist = new Uint16Array(cols * rows);
   const seen = new Uint8Array(cols * rows);
   return {
-    update(mask, width, height) {
+    prevBlobs: null, // 직전 프레임의 후보 덩어리들 (같은 자리 덩어리 제외용)
+    update(mask, width, height, blobs = null) {
+      if (blobs) this.prevBlobs = blobs;
       seen.fill(0);
       const cw = width / cols, ch = height / rows;
       for (let y = 0; y < height; y++) {
@@ -329,22 +340,46 @@ export function sampleBallParams(data, width, height, nx, ny, radiusPx = 12) {
 }
 
 // 한 프레임의 공 후보 전부 (색·크기·모양 기준 통과, 고정물 제외). 0~1 좌표. 모양 점수 높은 순.
-export function detectBallCandidates(data, width, height, params = DEFAULT_BALL_PARAMS, staticMap = null, maxCount = 40) {
+// camera: 이 프레임에서 화면이 밀린 양 {dx, dy} (있으면 직전 프레임 덩어리 위치를 그만큼 옮겨서 비교)
+// maxY: 이보다 아래(바닥 무늬·낙엽 구역)에 있는 덩어리는 아예 후보에서 뺌. 아이들 발목 높이 + 여유로 정함 (모르면 1)
+// motionDiff: createMotionMap().update() 결과(픽셀별 밝기 변화). 있으면 '공 색이면서 움직인' 픽셀만 후보로 삼음.
+//   마룻바닥·무대 벽처럼 공과 같은 색인 배경 앞을 지날 때 공이 배경 덩어리에 묻히는 것을 막음 (움직인 부분만 떼어냄)
+export function detectBallCandidates(data, width, height, params = DEFAULT_BALL_PARAMS, staticMap = null, maxCount = 80, camera = null, maxY = 1, motionDiff = null) {
   const p = { ...DEFAULT_BALL_PARAMS, ...params };
   const mask = makeColorMask(data, width, height, p);
+  if (motionDiff) {
+    const thr = p.motionMin || 10;
+    for (let i = 0; i < mask.length; i++) if (mask[i] && motionDiff[i] < thr) mask[i] = 0;
+  }
   const blobs = findBlobs(mask, width, height, { minArea: p.minArea });
-  staticMap?.update(mask, width, height);
   const maxArea = width * height * p.maxAreaFrac;
   const out = [];
+  const pre = [];
   for (const b of blobs) {
     if (b.area < p.minArea || b.area > maxArea) continue;
     if (b.core === 0 && b.area >= 8) continue; // 속 픽셀 없는 얇은 테두리 제외 (아주 작은 점은 원래 속이 없으니 면제)
     const shape = ballShapeScore(b);
     if (shape < 0.35) continue;
     const nx = b.cx / width, ny = b.cy / height;
-    if (staticMap && staticMap.isStatic(nx, ny)) continue;
-    out.push({ x: nx, y: ny, r: Math.sqrt(b.area / Math.PI) / width, area: b.area, shape });
+    if (ny > maxY) continue; // 바닥 아래쪽(마루 무늬·흙·낙엽)은 공이 갈 수 없는 곳
+    pre.push({ x: nx, y: ny, r: Math.sqrt(b.area / Math.PI) / width, area: b.area, shape });
   }
+  // 직전 프레임과 '같은 자리에 같은 크기'로 있던 덩어리(마루 무늬·낙엽·표지판)는 공이 아님. 던진 공은 매 프레임 자리를 옮김
+  const prev = staticMap?.prevBlobs || null;
+  const sx = camera ? camera.dx : 0, sy = camera ? camera.dy : 0;
+  for (const c of pre) {
+    if (staticMap && staticMap.isStatic(c.x, c.y)) continue;
+    if (prev) {
+      let same = false;
+      for (const q of prev) {
+        // 던진 공은 프레임당 최소 1.5% 이상 움직이므로 1% 이내는 '제자리'로 봄 (손떨림·블록 단위 카메라 추정 오차 흡수)
+        if (Math.abs(q.x + sx - c.x) < 0.01 && Math.abs(q.y + sy - c.y) < 0.01 && Math.max(q.area / c.area, c.area / q.area) < 1.6) { same = true; break; }
+      }
+      if (same) continue;
+    }
+    out.push(c);
+  }
+  staticMap?.update(mask, width, height, pre);
   out.sort((a, b) => b.shape - a.shape);
   return out.slice(0, maxCount);
 }
@@ -375,47 +410,54 @@ export function quadraticAccel(ys) {
   return det(Ma) / D;
 }
 
-export function createTrackletTracker({ linkRadius = 0.06, maxMissed = 5, minLen = 6, minTravel = 0.08, minSpeed = 0.015, minGravity = 0.0012, windowFrames = 24, stillFrames = 22, onConfirm = null } = {}) {
+export function createTrackletTracker({ linkRadius = 0.1, maxMissed = 5, minLen = 5, minTravel = 0.08, minSpeed = 0.015, minGravity = 0.0012, windowFrames = 24, stillFrames = 22, onConfirm = null, onReject = null } = {}) {
   let active = [];
   let nextId = 1;
   const confirmedIds = new Set();
   let gX = 0, gY = 0; // 카메라 움직임 누적 (화면이 통째로 밀린 양)
   return {
     // camera: createCameraMotion().update() 결과 {dx, dy} (이 프레임에서 화면이 밀린 양). 없으면 궤적들의 중앙값으로 추정
-    update(candidates, t, frame, camera = null) {
+    // floorY: 바닥 구역 시작 높이(아이들 발 높이 + 여유). 그 바로 위 띠(바닥 반사상·그림자·마루 무늬가 사는 곳)에서만 움직인 궤적은
+    //         던진 공으로 확정하지 않음. 이미 확정된 공이 떨어져 그 띠로 굴러 들어가는 것은 그대로 이어 붙음
+    update(candidates, t, frame, camera = null, floorY = 1) {
       const taken = new Set();
       const moves = []; // 이 프레임에서 이어 붙은 궤적들의 이동량 (카메라 움직임 추정용)
-      // 1) 기존 궤적에 가장 가까운 후보를 붙임 (속도를 반영한 예상 위치 기준)
+      // 1) 기존 궤적과 후보를 짝지음. 궤적 하나씩 차례로 고르면 앞에 있는 엉뚱한 궤적(바닥 무늬 등)이 공을 가로채므로,
+      //    모든 (궤적, 후보) 쌍을 거리순으로 늘어놓고 가까운 짝부터 맺음
+      const pairs = [];
       for (const tr of active) {
         const dt = Math.max(1, frame - tr.lastFrame);
         const px = tr.x + tr.vx * dt, py = tr.y + tr.vy * dt;
-        const radius = Math.min(0.12, linkRadius + Math.hypot(tr.vx, tr.vy) * dt * 1.5); // 끊긴 뒤 멀리 있는 다른 것(바닥의 다른 공 등)과 이어 붙지 않게 상한
-        let best = null, bestD = Infinity;
+        // 실내 가까운 거리의 빠른 던지기는 프레임당 화면의 8~13%씩 움직이므로 기본 반경을 넉넉히(0.1) 두고,
+        // 끊긴 뒤 멀리 있는 다른 것(바닥의 다른 공 등)과 이어 붙지 않게 상한(0.2)을 둠
+        const radius = Math.min(0.2, linkRadius + Math.hypot(tr.vx, tr.vy) * dt * 1.5);
         candidates.forEach((c, i) => {
-          if (taken.has(i)) return;
-          // 예상 위치(직전 속도로 계속 갔을 때) 또는 마지막 위치 근처(글러브에 맞고 방향이 바뀐 경우) 둘 중 하나에 가까우면 이어 붙임
+          // 예상 위치(직전 속도로 계속 갔을 때) 또는 마지막 위치 근처(글러브에 맞고 방향이 바뀐 경우) 둘 중 가까운 쪽
           const d = Math.min(Math.hypot(c.x - px, c.y - py), Math.hypot(c.x - tr.x, c.y - tr.y) + 0.02);
           // 크기가 갑자기 4배 넘게 달라지면 다른 물체
           const ratio = tr.area ? Math.max(c.area / tr.area, tr.area / c.area) : 1;
-          if (d < radius && d < bestD && ratio < 4) { best = i; bestD = d; }
+          if (d < radius && ratio < 4) pairs.push({ tr, i, d, dt });
         });
-        if (best != null) {
-          const c = candidates[best];
-          taken.add(best);
-          moves.push({ dx: (c.x - tr.x) / dt, dy: (c.y - tr.y) / dt });
-          // 공이 느려졌는지 (카메라 움직임을 뺀 실제 이동량 기준). 잡힌 뒤 글러브·손을 계속 따라가지 않도록 셈
-          const realStep = Math.hypot((c.x - tr.x) / dt - (camera ? camera.dx : 0), (c.y - tr.y) / dt - (camera ? camera.dy : 0));
-          tr.slowFrames = realStep < minSpeed * 0.8 ? (tr.slowFrames || 0) + 1 : 0;
-          tr.vx = 0.5 * tr.vx + 0.5 * ((c.x - tr.x) / dt);
-          tr.vy = 0.5 * tr.vy + 0.5 * ((c.y - tr.y) / dt);
-          tr.x = c.x; tr.y = c.y; tr.area = tr.area * 0.7 + c.area * 0.3;
-          tr.lastFrame = frame; tr.missed = 0;
-          tr.points.push({ frame, t, x: c.x, y: c.y, r: c.r, area: c.area });
-          tr.minX = Math.min(tr.minX, c.x); tr.maxX = Math.max(tr.maxX, c.x);
-        } else {
-          tr.missed++;
-        }
       }
+      pairs.sort((a, b) => a.d - b.d);
+      const linked = new Set();
+      for (const { tr, i, d, dt } of pairs) {
+        if (taken.has(i) || linked.has(tr)) continue;
+        taken.add(i); linked.add(tr);
+        const c = candidates[i];
+        moves.push({ dx: (c.x - tr.x) / dt, dy: (c.y - tr.y) / dt });
+        // 공이 느려졌는지 (카메라 움직임을 뺀 실제 이동량 기준). 잡힌 뒤 글러브·손을 계속 따라가지 않도록 셈
+        const realStep = Math.hypot((c.x - tr.x) / dt - (camera ? camera.dx : 0), (c.y - tr.y) / dt - (camera ? camera.dy : 0));
+        tr.slowFrames = realStep < minSpeed * 0.8 ? (tr.slowFrames || 0) + 1 : 0;
+        tr.vx = 0.5 * tr.vx + 0.5 * ((c.x - tr.x) / dt);
+        tr.vy = 0.5 * tr.vy + 0.5 * ((c.y - tr.y) / dt);
+        tr.x = c.x; tr.y = c.y; tr.area = tr.area * 0.7 + c.area * 0.3;
+        tr.lastFrame = frame; tr.missed = 0;
+        tr.points.push({ frame, t, x: c.x, y: c.y, r: c.r, area: c.area });
+        tr.minX = Math.min(tr.minX, c.x); tr.maxX = Math.max(tr.maxX, c.x);
+        void d;
+      }
+      for (const tr of active) if (!linked.has(tr)) tr.missed++;
       // 카메라 움직임 추정: 이어 붙은 것이 넉넉히(4개 이상) 있으면 그 이동량의 중앙값을 카메라가 밀린 양으로 봄.
       // (낙엽·울타리 같은 고정물은 모두 같은 방향으로 밀리고, 공 하나만 다르게 움직임)
       if (camera) {
@@ -440,7 +482,9 @@ export function createTrackletTracker({ linkRadius = 0.06, maxMissed = 5, minLen
       //    (카메라가 천천히 움직여 고정물이 화면에서 밀리는 것은 느려서 걸리지 않음)
       for (const tr of active) {
         if (tr.confirmed || tr.points.length < minLen) continue;
-        const recent = tr.points.slice(-windowFrames);
+        // 영상 맨 앞 몇 프레임은 카메라 움직임 추정이 준비되지 않아 제외 (짧은 영상의 첫 던지기도 잡히도록 0.3초만)
+        const recent = tr.points.slice(-windowFrames).filter((pt) => pt.frame >= 5);
+        if (recent.length < minLen) continue;
         let lo = Infinity, hi = -Infinity, pathX = 0, maxStep = 0;
         const steps = [];
         for (let k = 0; k < recent.length; k++) {
@@ -455,14 +499,18 @@ export function createTrackletTracker({ linkRadius = 0.06, maxMissed = 5, minLen
         const frames = Math.max(1, recent[recent.length - 1].frame - recent[0].frame);
         const sorted = steps.slice().sort((a, b) => a - b);
         const medStep = sorted[Math.floor(sorted.length / 2)] || 0;
+        const ys = recent.map((pt) => pt.y).sort((a, b) => a - b);
+        const medY = ys[Math.floor(ys.length / 2)];
+        if (floorY < 1 && medY > floorY - 0.1) continue; // 바닥 띠 안에서만 움직인 것 (반사상·그림자·마루 무늬)
         // 실제 던진 공: 한 방향으로 거의 완벽하게 매끄럽고(길이 합 ≤ 순이동의 1.1배), 프레임당 이동이 고름(최대가 중앙값의 2.5배 이내),
         // 그리고 '던진 공'답게 빠름(프레임당 평균 이동 ≥ minSpeed). 글러브·사람은 여러 덩어리를 번갈아 잇느라 들쭉날쭉함.
         // 첫 1초(15프레임)는 카메라 움직임·고정물 지도가 아직 준비되지 않아 확정하지 않음.
-        const uniform = maxStep <= Math.max(0.03, medStep * 2.5) && maxStep <= 0.15;
+        const uniform = maxStep <= Math.max(0.03, medStep * 2.5) && maxStep <= 0.25; // 실내 빠른 던지기는 프레임당 0.16까지 감
         // 중력 검사: 던진 공은 세로 방향으로 아래로 가속(포물선)한다. 카메라에 밀린 나무·낙엽이나 걷는 사람은 가속이 없다.
         // 세로 좌표를 2차식으로 맞춰 2차 계수(프레임²당)가 양수(아래쪽)로 충분해야 함
         const grav = quadraticAccel(recent.map((pt) => pt.cy));
-        if (recent[0].frame >= 15 && hi - lo >= minTravel && pathX <= (hi - lo) * 1.1 && uniform && (hi - lo) / frames >= minSpeed && grav >= minGravity) {
+        if (onReject && hi - lo >= minTravel) onReject({ travel: hi - lo, ratio: pathX / (hi - lo), uniform, maxStep, medStep, speed: (hi - lo) / frames, grav, n: recent.length, t0: recent[0].t, t1: recent[recent.length - 1].t });
+        if (hi - lo >= minTravel && pathX <= (hi - lo) * 1.1 && uniform && (hi - lo) / frames >= minSpeed && grav >= minGravity) {
           tr.confirmed = true;
           confirmedIds.add(tr.id);
           tr.confirmStats = { travel: hi - lo, frames, speed: (hi - lo) / frames, pathRatio: pathX / (hi - lo), maxStep, grav, n: recent.length, t0: recent[0].t, t1: recent[recent.length - 1].t };
@@ -483,17 +531,67 @@ export function createTrackletTracker({ linkRadius = 0.06, maxMissed = 5, minLen
         }
         return true;
       });
-      // 5) 이 프레임에서 갱신된 확정 궤적 중 가장 긴 것의 위치를 돌려줌
+      // 5) 이 프레임에서 갱신된 확정 궤적 중 '가장 공다운'(확정 당시 속도가 가장 빠른) 것의 위치를 돌려줌.
+      //    마루 무늬·낙엽이 카메라 흔들림으로 느리게 '날아간' 궤적보다, 실제로 던져진 빠른 공이 우선
       let out = null;
       for (const tr of active) {
-        if (tr.confirmed && tr.lastFrame === frame && (!out || tr.points.length > out.len)) {
-          const pt = tr.points[tr.points.length - 1];
-          out = { x: pt.x, y: pt.y, r: pt.r, area: pt.area, len: tr.points.length };
+        if (tr.confirmed && tr.lastFrame === frame) {
+          const q = tr.confirmStats ? (tr.confirmStats.quality ?? tr.confirmStats.speed) : 0;
+          if (!out || q > out.quality) {
+            const pt = tr.points[tr.points.length - 1];
+            out = { x: pt.x, y: pt.y, r: pt.r, area: pt.area, quality: q };
+          }
         }
       }
       return out;
     },
+    get active() { return active; }, // 디버그용
     reset() { active = []; confirmedIds.clear(); },
+  };
+}
+
+// 공이 있을 수 있는 가장 낮은 높이: 사람 발목(최근 프레임들) 또는 채점자가 찍은 발 위치 + 여유. 아무 정보도 없으면 1(제한 없음)
+export function playBandMaxY({ people = null, players = null, recentAnkles = null } = {}) {
+  let ankle = null;
+  const take = (y) => { if (y != null && (ankle == null || y > ankle)) ankle = y; };
+  for (const p of people || []) take(p.ankleY);
+  for (const y of recentAnkles || []) take(y);
+  for (const pl of players || []) take(pl.footY);
+  return ankle != null ? Math.min(1, ankle + 0.06) : 1;
+}
+
+// 궤적 결과를 track 배열에 적는 도우미. 프레임마다 '품질'(확정 당시 속도)을 기억해 두고,
+// 더 공다운(빠른) 궤적이 나중에 확정되면 그 프레임들을 덮어씀. 느린 잡음 궤적이 먼저 채워 둔 자리를 공이 되찾음.
+// floorY(): 현재 '바닥 구역 시작 높이'를 돌려주는 함수(선택). 확정 창 전체가 발 근처 바닥 띠 안에만 있던 궤적(마루 무늬·낙엽)은 품질을 깎음
+export function createTrackWriter(track, floorY = null) {
+  const quality = new Map();
+  const qualityOf = (points, stats) => {
+    let q = stats ? stats.speed : 0;
+    const fy = floorY ? floorY() : null;
+    if (fy != null && fy < 1 && points.length && points.every((pt) => pt.y > fy - 0.1)) q *= 0.3;
+    return q;
+  };
+  return {
+    // 궤적이 확정되었을 때: 그 궤적의 앞 프레임들을 채움
+    confirm(points, stats) {
+      const q = qualityOf(points, stats);
+      if (stats) stats.quality = q;
+      for (const pt of points) {
+        const f = track[pt.frame];
+        if (!f) continue;
+        if (f.found && (quality.get(pt.frame) || 0) >= q) continue;
+        f.x = pt.x; f.y = pt.y; f.r = pt.r; f.area = pt.area; f.found = true;
+        quality.set(pt.frame, q);
+      }
+    },
+    // 이번 프레임의 결과(tracker.update 반환값)를 적음
+    frame(index, f, ball) {
+      if (!ball) { if (f.found == null) f.found = false; return; }
+      const q = ball.quality || 0;
+      if (f.found && (quality.get(index) || 0) > q) return;
+      f.x = ball.x; f.y = ball.y; f.r = ball.r; f.area = ball.area; f.found = true;
+      quality.set(index, q);
+    },
   };
 }
 
