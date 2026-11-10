@@ -81,7 +81,7 @@ export async function analyzeVideo(video, { fps = 15, ballParams, poseLandmarker
       people: people || undefined,
     };
     track.push(frame);
-    onFrame?.({ frame, index: i, total: Math.ceil(duration / step), t, duration });
+    onFrame?.({ frame, index: i, total: Math.ceil(duration / step), t, duration, candidates });
   }
   return track;
 }

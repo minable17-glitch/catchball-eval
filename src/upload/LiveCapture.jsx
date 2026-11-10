@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { submitVideo } from '../api.js';
-import { canRecord, createLiveAnalyzer, createRecorder, drawLiveOverlay, openCamera, stopStream } from '../live.js';
+import { canRecord, createLiveAnalyzer, createRecorder, drawLiveOverlay, openCamera, startCandidatePreview, stopStream } from '../live.js';
 import { loadPoseLandmarker } from '../pose.js';
 import { DEFAULT_BALL_PARAMS, sampleBallParams } from '../analysis.js';
 
@@ -28,6 +28,18 @@ export default function LiveCapture({ info, validate, onDone }) {
   const poseRef = useRef(null);
   const lastEventRef = useRef(null);
   const lastUiRef = useRef(0);
+  const previewRef = useRef(null);
+  const [candCount, setCandCount] = useState(0);
+
+  // 촬영 전 미리보기에서 공 색 후보를 바로 표시 (공 색을 찍으면 그 기준으로 다시 시작)
+  useEffect(() => {
+    if (phase !== 'ready') { previewRef.current?.stop(); previewRef.current = null; return; }
+    const v = videoRef.current, c = overlayRef.current;
+    if (!v || !c) return;
+    let n = 0;
+    previewRef.current = startCandidatePreview({ video: v, canvas: c, ballParams, onFrame: (cands) => { if (++n % 8 === 0) setCandCount(cands.length); } });
+    return () => { previewRef.current?.stop(); previewRef.current = null; };
+  }, [phase, ballParams]);
 
   useEffect(() => () => { analyzerRef.current?.stop?.(); stopStream(streamRef.current); }, []);
 
@@ -70,11 +82,11 @@ export default function LiveCapture({ info, validate, onDone }) {
       fps: 15,
       ballParams,
       poseLandmarker: poseRef.current,
-      onUpdate: ({ frame, recent, stats, events, groundY, poseMs, t }) => {
+      onUpdate: ({ frame, recent, stats, events, groundY, poseMs, t, candidates }) => {
         const latest = events[events.length - 1];
         if (latest && latest !== lastEventRef.current) { lastEventRef.current = latest; lastEventRef.flashUntil = performance.now() + 900; }
         const flash = lastEventRef.flashUntil > performance.now() ? lastEventRef.current : null;
-        drawLiveOverlay(overlayRef.current, v, { frame, recent, groundY, stats, event: flash });
+        drawLiveOverlay(overlayRef.current, v, { frame, recent, groundY, stats, event: flash, candidates });
         const now = performance.now();
         if (now - lastUiRef.current > 250) { lastUiRef.current = now; setLive((s) => ({ ...s, stats, t, poseMs })); }
       },
@@ -187,7 +199,7 @@ export default function LiveCapture({ info, validate, onDone }) {
       {phase === 'opening' && <p className="cb-note">카메라와 인식 모델을 준비하는 중... (처음 한 번은 몇 초 걸립니다)</p>}
       {phase === 'ready' && (
         <>
-          <p className="cb-note">두 사람이 옆모습으로 화면에 다 들어오게 휴대폰을 고정하세요. <b>화면 속 공을 한 번 눌러</b> 공 색을 알려 주면 더 정확합니다{ballPicked ? ' (잡았어요 ✅)' : ''}. 준비되면 촬영을 시작하세요.</p>
+          <p className="cb-note">두 사람이 옆모습으로 화면에 다 들어오게 휴대폰을 고정하세요. <b>화면 속 공을 한 번 눌러</b> 공 색을 알려 주면 더 정확합니다{ballPicked ? ' (잡았어요 ✅)' : ''}. 주황 원이 공 위에 뜨면 잘 보고 있는 것입니다{candCount > 8 ? ' (지금은 공 아닌 것도 많이 잡히고 있어요. 공을 눌러 색을 알려 주세요)' : ''}. 준비되면 촬영을 시작하세요.</p>
           <button type="button" className="cb-btn big" onClick={startRecording}>⏺ 촬영 시작</button>
         </>
       )}

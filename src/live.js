@@ -112,7 +112,7 @@ export function createLiveAnalyzer({ video, fps = 15, ballParams = DEFAULT_BALL_
       const res = detectEvents(track, eventParams);
       events = res.events; groundY = res.groundY; stats = res.stats;
     }
-    onUpdate?.({ frame, recent, stats, events, groundY, poseMs, t });
+    onUpdate?.({ frame, recent, stats, events, groundY, poseMs, t, candidates });
   };
 
   return {
@@ -128,7 +128,29 @@ export function createLiveAnalyzer({ video, fps = 15, ballParams = DEFAULT_BALL_
 }
 
 // 미리보기 위에 공·손목·바닥선·점수를 그림
-export function drawLiveOverlay(canvas, video, { frame, recent, groundY, stats, event } = {}) {
+// 촬영 전 미리보기: 공 색 후보만 찾아서 보여줌 (추적·녹화 없음). stop() 으로 멈춤
+export function startCandidatePreview({ video, canvas, ballParams = DEFAULT_BALL_PARAMS, fps = 8, onFrame }) {
+  const work = document.createElement('canvas');
+  const ctx = work.getContext('2d', { willReadFrequently: true });
+  let running = true, rafId = 0, last = 0;
+  const tick = () => {
+    if (!running) return;
+    rafId = requestAnimationFrame(tick);
+    const now = performance.now();
+    if (now - last < 1000 / fps || !video.videoWidth) return;
+    last = now;
+    if (work.width !== LIVE_WIDTH) { work.width = LIVE_WIDTH; work.height = Math.max(1, Math.round(video.videoHeight * LIVE_WIDTH / video.videoWidth)); }
+    ctx.drawImage(video, 0, 0, work.width, work.height);
+    const img = ctx.getImageData(0, 0, work.width, work.height);
+    const candidates = detectBallCandidates(img.data, work.width, work.height, ballParams, null);
+    drawLiveOverlay(canvas, video, { candidates });
+    onFrame?.(candidates);
+  };
+  tick();
+  return { stop() { running = false; cancelAnimationFrame(rafId); } };
+}
+
+export function drawLiveOverlay(canvas, video, { frame, recent, groundY, stats, event, candidates } = {}) {
   if (!canvas || !video?.videoWidth) return;
   if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
     canvas.width = video.videoWidth; canvas.height = video.videoHeight;
@@ -149,6 +171,11 @@ export function drawLiveOverlay(canvas, video, { frame, recent, groundY, stats, 
     for (const w of person.wrists || []) {
       ctx.fillStyle = 'rgba(0,200,255,0.9)'; ctx.beginPath(); ctx.arc(w.x * W, w.y * H, lw * 4, 0, Math.PI * 2); ctx.fill();
     }
+  }
+  // 공 색 후보(아직 공으로 확정되지 않은 것)는 작은 주황 원으로 — "지금 무엇을 공 색으로 보고 있나" 확인용
+  for (const c of candidates || []) {
+    ctx.strokeStyle = 'rgba(255,160,0,0.85)'; ctx.lineWidth = lw;
+    ctx.beginPath(); ctx.arc(c.x * W, c.y * H, Math.max(lw * 2.5, (c.r || 0.005) * W * 1.6), 0, Math.PI * 2); ctx.stroke();
   }
   if (frame?.found) {
     ctx.strokeStyle = '#ff3b30'; ctx.lineWidth = lw * 1.5;

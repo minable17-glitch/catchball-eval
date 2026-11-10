@@ -206,6 +206,11 @@ export default function App() {
         ctx.beginPath(); ctx.arc(w.x * W, w.y * H, lw * 3, 0, Math.PI * 2); ctx.fill();
       }
     }
+    // 공 색 후보 (아직 공으로 확정되지 않은 것): 작은 주황 원
+    for (const c of extra.candidates || []) {
+      ctx.strokeStyle = 'rgba(255,160,0,0.85)'; ctx.lineWidth = lw;
+      ctx.beginPath(); ctx.arc(c.x * W, c.y * H, Math.max(lw * 2.5, (c.r || 0.005) * W * 1.6), 0, Math.PI * 2); ctx.stroke();
+    }
     // 공
     if (frame.found) {
       const r = Math.max(lw * 4, (frame.r || 0.01) * W * 1.8);
@@ -366,13 +371,13 @@ export default function App() {
         ballParams,
         poseLandmarker: pose,
         signal: controller.signal,
-        onFrame: ({ frame, index, total }) => {
+        onFrame: ({ frame, index, total, candidates }) => {
           frameCount++;
           if (frame.found) {
             liveRef.current.recent.push({ x: frame.x, y: frame.y });
             if (liveRef.current.recent.length > 8) liveRef.current.recent.shift();
           }
-          drawOverlay(frame, { recent: liveRef.current.recent });
+          drawOverlay(frame, { recent: liveRef.current.recent, candidates });
           if (index % 3 === 0 || index === total - 1) setProgress({ index: index + 1, total });
         },
       });
@@ -552,7 +557,7 @@ export default function App() {
                 <div className="cb-progress-text">
                   {status === 'loading' && '영상을 읽는 중...'}
                   {status === 'pose' && '손 인식 모델을 준비하는 중... (처음 한 번만 몇 초 걸립니다)'}
-                  {status === 'analyzing' && `채점 중 ${pct}% (${progress.index}/${progress.total}장)`}
+                  {status === 'analyzing' && `채점 중 ${pct}% (${progress.index}/${progress.total}장) · 주황 원 = 공 색 후보, 빨간 원 = 날아간 것이 확인된 공`}
                 </div>
                 <button type="button" className="cb-btn ghost" onClick={cancelAnalysis}>취소</button>
               </div>
