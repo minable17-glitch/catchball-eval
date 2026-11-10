@@ -9,7 +9,9 @@ const KEY = 'catchball_screen';
 export default function Root() {
   const [screen, setScreen] = useState(() => {
     try {
-      if (new URLSearchParams(window.location.search).has('teacher')) return 'teacher';
+      const q = new URLSearchParams(window.location.search);
+      if (q.has('teacher')) return 'teacher';
+      if (q.has('student')) return 'student'; // 학생에게 보내는 링크: 항상 제출 화면으로
       return localStorage.getItem(KEY) === 'teacher' ? 'teacher' : 'student';
     } catch { return 'student'; }
   });

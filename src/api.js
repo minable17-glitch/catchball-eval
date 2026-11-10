@@ -1,6 +1,7 @@
 // 수파베이스(저장소 + 데이터베이스)와 통신하는 부분.
 // 영상은 storage 버킷 catchball-videos 에, 제출 목록·채점 결과는 RPC(supabase/catchball.sql)로 저장.
 import { supabase, supabaseAnonKey, supabaseUrl, VIDEO_BUCKET } from './supabase.js';
+import { deleteDriveFile, fetchDriveVideo, uploadToDrive } from './drive.js';
 
 export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 버킷 파일 크기 제한
 
@@ -55,30 +56,108 @@ export async function uploadVideo({ blob, fileName, onProgress }) {
   return { path };
 }
 
+// ── 설정 (명렬표, 촬영 안내, 촬영 시간, 드라이브 연결) ──
+
+export const DEFAULT_GUIDE = '두 사람이 옆모습으로 한 화면에 다 들어오게, 휴대폰을 가로로 눕혀 고정하고 찍어 주세요. 촬영 전에 화면에서 두 사람이 선 자리를 한 번씩 눌러 표시합니다.';
+
+function rowsToMap(rows) { const m = {}; for (const r of rows || []) m[r.key] = r.value ?? ''; return m; }
+
+// 명렬표 글: "1학년 3반" 줄 다음에 이름들(쉼표·띄어쓰기·줄바꿈 구분). 반 줄은 "반"으로 끝나거나 #, [ 로 시작.
+export function parseRoster(text) {
+  const classes = [];
+  let cur = null;
+  for (const raw of String(text || '').split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (/^[#[]/.test(line) || /반\s*\]?\s*$/.test(line)) {
+      cur = { name: line.replace(/^[#[]\s*|\s*\]$/g, '').trim(), students: [] };
+      classes.push(cur);
+      continue;
+    }
+    if (!cur) { cur = { name: '', students: [] }; classes.push(cur); }
+    for (const n of line.split(/[,，、·/\s]+/)) { const nm = n.trim(); if (nm && !cur.students.includes(nm)) cur.students.push(nm); }
+  }
+  return classes.filter((c) => c.students.length);
+}
+
+function normalizeSettings(m) {
+  return {
+    roster: m.roster || '',
+    classes: parseRoster(m.roster || ''),
+    guideText: m.guide_text || '',
+    maxSeconds: Math.max(10, Math.min(600, Number(m.max_seconds) || 60)),
+    allowResubmit: (m.allow_resubmit ?? '1') !== '0',
+    scriptUrl: (m.script_url || '').trim(),
+    driveKey: m.drive_key || '',
+    signupCode: m.signup_code || '',
+  };
+}
+
+// 학생 화면: 공개 설정 (아직 v2 SQL 을 안 돌린 서버면 기본값)
+export async function getPublicSettings() {
+  await ensureSession();
+  let rows = [];
+  try { rows = await rpc('catchball_public_settings'); } catch (e) { console.warn('설정을 못 읽어 기본값으로 진행', e); }
+  return normalizeSettings(rowsToMap(rows));
+}
+
+// 선생님: 전체 설정 (드라이브 키 포함). 읽은 뒤 드라이브 설정을 기억해 영상 가져오기·삭제에 씀
+export async function getSettings() {
+  const rows = await rpc('catchball_get_settings');
+  const st = normalizeSettings(rowsToMap(rows));
+  driveCfg = { scriptUrl: st.scriptUrl, teacherKey: st.driveKey };
+  return st;
+}
+
+export async function setSetting(key, value) {
+  await rpc('catchball_set_setting', { p_key: key, p_value: value == null ? '' : String(value) });
+  if (key === 'script_url') driveCfg = { ...driveCfg, scriptUrl: String(value || '').trim() };
+  if (key === 'drive_key') driveCfg = { ...driveCfg, teacherKey: String(value || '') };
+}
+
+let driveCfg = { scriptUrl: '', teacherKey: '' };
+export function getDriveConfig() { return driveCfg; }
+export const isDrivePath = (path) => typeof path === 'string' && path.startsWith('drive:');
+
 /**
- * 영상 제출 전체 흐름: storage 업로드 → 제출 기록(RPC)
+ * 영상 제출 전체 흐름: 드라이브가 연결돼 있으면 드라이브로, 아니면 수파베이스 storage 로 올린 뒤 제출 기록(RPC)
  * onStatus(text), onProgress(0~1)
  */
-export async function submitVideo({ info, blob, fileName, durationSec = null, extra = {}, onStatus, onProgress }) {
-  onStatus?.('영상 올리는 중...');
-  const { path } = await uploadVideo({ blob, fileName, onProgress });
+export async function submitVideo({ info, blob, fileName, durationSec = null, playerMarks = null, scriptUrl = '', onStatus, onProgress }) {
+  let path, driveFileId = null, driveLink = null, finalName = safeName(fileName), size = blob.size;
+  // 다시 제출이 막혀 있으면 영상을 올리기 전에 알려 줌 (v2 SQL 전 서버면 건너뜀)
+  try {
+    const ok = await rpc('catchball_can_submit', { p_eval_date: info.date || null, p_class_name: info.className, p_student1: info.student1, p_student2: info.student2 });
+    if (ok === false) throw new Error('이 팀은 오늘 이미 제출했어요. 다시 내려면 선생님께 말씀해 주세요');
+  } catch (e) {
+    if (/이미 제출/.test(e?.message || '')) throw e;
+    console.warn('제출 가능 여부 확인 건너뜀', e);
+  }
+  if (scriptUrl) {
+    const up = await uploadToDrive({ scriptUrl, info, blob, fileName: finalName, onStatus, onProgress });
+    driveFileId = up.fileId; driveLink = up.link || null; finalName = up.fileName || finalName; size = up.size || size;
+    path = 'drive:' + driveFileId;
+  } else {
+    onStatus?.('영상 올리는 중...');
+    ({ path } = await uploadVideo({ blob, fileName, onProgress }));
+  }
   onStatus?.('제출 기록 남기는 중...');
-  const rows = await rpc('catchball_submit', {
+  const rows = await rpc('catchball_submit_v2', {
     p_eval_date: info.date || null,
     p_class_name: info.className,
     p_student1: info.student1,
     p_student2: info.student2,
     p_storage_path: path,
-    p_file_name: safeName(fileName),
-    p_size_bytes: blob.size,
+    p_drive_file_id: driveFileId,
+    p_drive_link: driveLink,
+    p_file_name: finalName,
+    p_size_bytes: size,
     p_mime_type: blob.type || 'video/webm',
     p_duration_sec: durationSec,
-    p_auto_success: extra.autoSuccess ?? null,
-    p_auto_fail: extra.autoFail ?? null,
-    p_auto_events: extra.autoEvents ?? null,
+    p_player_marks: playerMarks,
   });
   const row = Array.isArray(rows) ? rows[0] : rows;
-  return { id: row?.id, path, fileName: safeName(fileName) };
+  return { id: row?.id, path, fileName: finalName, driveLink, storage: scriptUrl ? 'drive' : 'supabase' };
 }
 
 // ── 선생님 ──
@@ -135,6 +214,8 @@ export async function listSubmissions() {
     durationSec: r.duration_sec,
     status: r.status,
     autoSuccess: r.auto_success, autoFail: r.auto_fail,
+    driveFileId: r.drive_file_id || null, driveLink: r.drive_link || null,
+    playerMarks: Array.isArray(r.player_marks) ? r.player_marks : null,
   }));
 }
 
@@ -148,8 +229,13 @@ export async function listResults() {
   }));
 }
 
-// 채점할 영상 내려받기 → Blob
-export async function fetchVideo(path) {
+// 채점할 영상 내려받기 → Blob (드라이브 영상이면 앱스크립트로 조각 받기)
+export async function fetchVideo(path, onProgress) {
+  if (isDrivePath(path)) {
+    if (!driveCfg.scriptUrl || !driveCfg.teacherKey) throw new Error('드라이브 연결 정보가 없습니다. 설정에서 드라이브를 연결해 주세요.');
+    const { blob } = await fetchDriveVideo(driveCfg, path.slice('drive:'.length), onProgress);
+    return blob;
+  }
   const { data, error } = await supabase.storage.from(VIDEO_BUCKET).download(path);
   if (error) throw new Error('영상을 가져오지 못했습니다: ' + (error.message || ''));
   return data;
@@ -180,6 +266,11 @@ export async function deleteResult(id) {
 export async function deleteSubmission(item) {
   const path = await rpc('catchball_delete_submission', { p_id: item.id });
   const target = path || item.path;
+  if (isDrivePath(target)) {
+    if (!driveCfg.scriptUrl || !driveCfg.teacherKey) throw new Error('기록은 지웠지만 드라이브 연결 정보가 없어 영상 파일은 못 지웠습니다.');
+    try { await deleteDriveFile(driveCfg, target.slice('drive:'.length)); } catch (e) { throw new Error('기록은 지웠지만 드라이브 영상 삭제에 실패했습니다: ' + (e?.message || '')); }
+    return;
+  }
   if (target) {
     const { error } = await supabase.storage.from(VIDEO_BUCKET).remove([target]);
     if (error) throw new Error('기록은 지웠지만 영상 파일 삭제에 실패했습니다: ' + error.message);

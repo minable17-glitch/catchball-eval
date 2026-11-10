@@ -3,7 +3,8 @@ import { DEFAULT_BALL_PARAMS, DEFAULT_EVENT_PARAMS, detectEvents, makeColorMask,
 import { analyzeVideo, previewMask } from './analyzer.js';
 import { loadPoseLandmarker } from './pose.js';
 import { addRecord, deleteRecord, exportRecordsToExcel, loadRecords, todayKST } from './records.js';
-import { deleteSubmission, fetchVideo, getSavedTeacherUsername, listLabelCounts, listResults, listSubmissions, saveResult, teacherLogin, teacherLogout, teacherMe, teacherSignup } from './api.js';
+import { DEFAULT_GUIDE, deleteSubmission, fetchVideo, getSavedTeacherUsername, getSettings, listLabelCounts, listResults, listSubmissions, parseRoster, saveResult, setSetting, teacherLogin, teacherLogout, teacherMe, teacherSignup } from './api.js';
+import { isValidScriptUrl, makeTeacherKey, pingScript, setupScript } from './drive.js';
 import Label from './Label.jsx';
 
 const FPS_OPTIONS = [
@@ -82,7 +83,17 @@ export default function App() {
   const [labelCounts, setLabelCounts] = useState({}); // submissionId → {n, nPresent}
   const [labeling, setLabeling] = useState(null); // 공 표시 중인 제출물
   const [fetchingId, setFetchingId] = useState(null);
+  const [fetchPct, setFetchPct] = useState(null);
   const [currentSubmissionId, setCurrentSubmissionId] = useState(null);
+  // ── 제출 설정 (명렬표, 촬영 안내, 촬영 시간, 드라이브 연결) ──
+  const [cfg, setCfg] = useState(null); // 서버에서 읽은 설정
+  const [cfgDraft, setCfgDraft] = useState({ roster: '', guideText: '', maxSeconds: 60, allowResubmit: true, scriptUrl: '' });
+  const [cfgMsg, setCfgMsg] = useState('');
+  const [cfgBusy, setCfgBusy] = useState(false);
+  const [showCfg, setShowCfg] = useState(false);
+  const [driveState, setDriveState] = useState({ status: 'none', msg: '' }); // none | checking | ok | bad | needKey
+  const [driveKeyInput, setDriveKeyInput] = useState('');
+  const pendingMarksRef = useRef(null);
   const apiReady = !!teacher;
 
   const videoRef = useRef(null);
@@ -106,10 +117,15 @@ export default function App() {
 
   // ── 선생님 로그인 / 제출 목록 ──
   const refreshFromServer = useCallback(async () => {
-    const [subs, res, counts] = await Promise.all([listSubmissions(), listResults(), listLabelCounts().catch(() => ({}))]);
+    const [subs, res, counts, st] = await Promise.all([listSubmissions(), listResults(), listLabelCounts().catch(() => ({})), getSettings().catch((e) => { console.warn('설정 읽기 실패 (v2 SQL 실행 전?)', e); return null; })]);
     setSubmissions(subs);
     setSheetResults(res);
     setLabelCounts(counts || {});
+    if (st) {
+      setCfg(st);
+      setCfgDraft({ roster: st.roster, guideText: st.guideText, maxSeconds: st.maxSeconds, allowResubmit: st.allowResubmit, scriptUrl: st.scriptUrl });
+      setDriveState(st.scriptUrl && st.driveKey ? { status: 'ok', msg: '연결됨' } : { status: 'none', msg: '' });
+    }
   }, []);
 
   // 페이지를 열 때 이미 로그인된 선생님이 있으면 그대로 이어감
@@ -149,18 +165,66 @@ export default function App() {
   };
 
   const gradeSubmission = async (item) => {
-    setFetchingId(item.id);
+    setFetchingId(item.id); setFetchPct(null);
     try {
-      const blob = await fetchVideo(item.path);
+      const blob = await fetchVideo(item.path, (p) => setFetchPct(Math.round(p * 100)));
       setInfo((v) => ({ ...v, date: item.date || v.date, className: item.className, student1: item.student1, student2: item.student2, memo: '' }));
       setCurrentSubmissionId(item.id);
+      pendingMarksRef.current = Array.isArray(item.playerMarks) && item.playerMarks.length === 2 ? item.playerMarks.map((m) => ({ x: Number(m.x), footY: Number(m.footY), name: m.name || null })) : null;
       onPickFile(blob, item.fileName || 'video.webm');
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (e) {
       setToast(e?.message || '영상을 가져오지 못했습니다.');
     } finally {
-      setFetchingId(null);
+      setFetchingId(null); setFetchPct(null);
     }
+  };
+
+  // ── 제출 설정 저장 / 드라이브 연결 ──
+  const saveCfg = async () => {
+    setCfgBusy(true); setCfgMsg('');
+    try {
+      await setSetting('roster', cfgDraft.roster);
+      await setSetting('guide_text', cfgDraft.guideText);
+      await setSetting('max_seconds', String(Math.max(10, Math.min(600, Number(cfgDraft.maxSeconds) || 60))));
+      await setSetting('allow_resubmit', cfgDraft.allowResubmit ? '1' : '0');
+      const st = await getSettings();
+      setCfg(st);
+      setCfgMsg(`저장했습니다. 명렬표 ${st.classes.length}개 반, ${st.classes.reduce((n, c) => n + c.students.length, 0)}명.`);
+    } catch (e) {
+      setCfgMsg('저장 실패: ' + (e?.message || ''));
+    } finally { setCfgBusy(false); }
+  };
+
+  const connectDrive = async () => {
+    const url = cfgDraft.scriptUrl.trim();
+    if (!isValidScriptUrl(url)) { setDriveState({ status: 'bad', msg: '앱스크립트 웹 앱 주소(https://script.google.com/macros/s/.../exec)를 넣어 주세요.' }); return; }
+    setDriveState({ status: 'checking', msg: '확인 중...' });
+    try {
+      await pingScript(url);
+      // 선생님 키: 서버에 저장된 것이 있으면 그걸로, 없으면 새로 만들어 앱스크립트에 등록
+      const key = driveKeyInput.trim() || cfg?.driveKey || makeTeacherKey();
+      const r = await setupScript(url, key);
+      if (r.needKey) { setDriveState({ status: 'needKey', msg: r.error || '이미 정해진 선생님 키를 넣어 주세요.' }); return; }
+      await setSetting('script_url', url);
+      await setSetting('drive_key', key);
+      const st = await getSettings();
+      setCfg(st);
+      setDriveKeyInput('');
+      setDriveState({ status: 'ok', msg: r.created ? '연결됐습니다. 이제 학생 영상은 선생님 구글 드라이브의 "캐치볼 제출" 폴더에 저장됩니다.' : '연결 확인됐습니다.' });
+    } catch (e) {
+      setDriveState({ status: 'bad', msg: e?.message || '연결 실패' });
+    }
+  };
+
+  const disconnectDrive = async () => {
+    if (!window.confirm('드라이브 연결을 끊을까요? 이후 제출되는 영상은 수파베이스 저장소(1GB)에 저장됩니다. 이미 드라이브에 있는 영상은 다시 연결하면 볼 수 있어요.')) return;
+    try {
+      await setSetting('script_url', '');
+      setCfgDraft((d) => ({ ...d, scriptUrl: '' }));
+      const st = await getSettings(); setCfg(st);
+      setDriveState({ status: 'none', msg: '' });
+    } catch (e) { setDriveState({ status: 'bad', msg: e?.message || '' }); }
   };
 
   const removeSubmission = async (item) => {
@@ -252,7 +316,7 @@ export default function App() {
       ctx.strokeStyle = '#00c8ff'; ctx.lineWidth = lw * 1.5;
       ctx.beginPath(); ctx.moveTo(pl.x * W - lw * 8, pl.footY * H); ctx.lineTo(pl.x * W + lw * 8, pl.footY * H); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(pl.x * W, pl.footY * H - lw * 8); ctx.lineTo(pl.x * W, pl.footY * H); ctx.stroke();
-      ctx.fillStyle = '#00c8ff'; ctx.fillText(i === 0 ? '왼쪽 아이' : '오른쪽 아이', pl.x * W, pl.footY * H + lw * 10);
+      ctx.fillStyle = '#00c8ff'; ctx.fillText(pl.name || (i === 0 ? '왼쪽 아이' : '오른쪽 아이'), pl.x * W, pl.footY * H + lw * 10);
     });
   }, [status, calib]);
 
@@ -297,7 +361,9 @@ export default function App() {
     await ensureDuration(video);
     setDuration(video.duration);
     if (status === 'loading') {
-      setCalib({ ball: null, params: null, players: [] }); setCalibStep(0); setCalibMsg('');
+      const marks = pendingMarksRef.current; pendingMarksRef.current = null;
+      setCalib({ ball: null, params: null, players: marks || [] }); setCalibStep(0);
+      setCalibMsg(marks ? '학생이 촬영 전에 표시한 두 사람 자리(하늘색)를 불러왔어요. 공을 눌러 주거나, 바로 "채점 시작"을 누르세요.' : '');
       const t0 = Math.min(0.5, Math.max(0, video.duration - 0.1));
       setCalibTime(t0);
       video.currentTime = t0;
@@ -333,8 +399,9 @@ export default function App() {
       mctx.drawImage(c, Math.round(center.x * w) - 30, Math.round(center.y * h) - 30, 60, 60, 0, 0, 180, 180);
       mctx.strokeStyle = '#ff3b30'; mctx.lineWidth = 2; mctx.beginPath(); mctx.arc(90, 90, 18, 0, Math.PI * 2); mctx.stroke();
       setCalibMag(mag.toDataURL());
-      setCalibMsg(`공 색을 잡았어요 (색상 ${params.sample.h}, 크기 ${params.sample.area}px). 오른쪽 확대 그림의 빨간 원 안이 공이 맞으면, 이제 왼쪽 아이의 발을 눌러 주세요. 아니면 공을 다시 눌러 주세요.`);
-      setCalibStep(1);
+      const havePlayers = calib.players.length >= 2;
+      setCalibMsg(`공 색을 잡았어요 (색상 ${params.sample.h}, 크기 ${params.sample.area}px). 오른쪽 확대 그림의 빨간 원 안이 공이 맞으면, ${havePlayers ? '"채점 시작"을 누르세요' : '이제 왼쪽 아이의 발을 눌러 주세요'}. 아니면 공을 다시 눌러 주세요.`);
+      setCalibStep(havePlayers ? 3 : 1);
     } else if (calibStep === 1 || calibStep === 2) {
       setCalib((c0) => ({ ...c0, players: [...c0.players, { x: nx, footY: ny }] }));
       setCalibMsg(calibStep === 1 ? '이제 오른쪽 아이의 발을 눌러 주세요.' : '다 찍었어요. "채점 시작"을 눌러 주세요.');
@@ -597,7 +664,7 @@ export default function App() {
                   <span className="cb-sub">{fmtTime(calibTime)}</span>
                 </div>
                 <div className="cb-row" style={{ margin: 0 }}>
-                  <button type="button" className="cb-btn" onClick={startAnalysis}>{calibStep === 0 ? '찍지 않고 자동으로 채점 시작' : '채점 시작'}</button>
+                  <button type="button" className="cb-btn" onClick={startAnalysis}>{calibStep === 0 && calib.players.length < 2 ? '찍지 않고 자동으로 채점 시작' : '채점 시작'}</button>
                   {calibStep === 0 && <button type="button" className="cb-btn ghost" onClick={() => { setCalibStep(1); setCalibMsg('공은 자동으로 찾습니다. 왼쪽 아이의 발을 눌러 주세요.'); }}>공은 건너뛰고 아이만 찍기</button>}
                   {calibStep > 0 && <button type="button" className="cb-btn ghost" onClick={redoBall}>공 다시 찍기</button>}
                   <button type="button" className="cb-btn ghost" onClick={resetCalib} disabled={calibStep === 0}>다시 찍기</button>
@@ -665,16 +732,62 @@ export default function App() {
                   <div>
                     <div><b>{it.student1} · {it.student2}</b> <span className="cb-sub">{it.className}</span>
                       <span className={`cb-pill ${it.status === '채점완료' ? 'done' : ''}`}>{it.status || '미채점'}</span></div>
-                    <div className="meta">{it.date} · {it.sizeMb}MB{it.durationSec ? ` · ${fmtTime(it.durationSec)}` : ''}{it.autoSuccess != null ? ` · 촬영 중 자동 카운트: 성공 ${it.autoSuccess} · 실패 ${it.autoFail}` : ''}</div>
+                    <div className="meta">{it.date} · {it.sizeMb}MB{it.durationSec ? ` · ${fmtTime(it.durationSec)}` : ''}{it.playerMarks?.length === 2 ? ' · 학생 자리 표시됨' : ''}{it.autoSuccess != null ? ` · 촬영 중 자동 카운트: 성공 ${it.autoSuccess} · 실패 ${it.autoFail}` : ''}{it.driveLink ? <> · <a href={it.driveLink} target="_blank" rel="noreferrer">드라이브에서 보기</a></> : ''}</div>
                   </div>
                   <div className="cb-row" style={{ margin: 0 }}>
-                    <button type="button" className="cb-btn" onClick={() => gradeSubmission(it)} disabled={busy || fetchingId != null}>{fetchingId === it.id ? '가져오는 중...' : it.status === '채점완료' ? '다시 채점' : '채점'}</button>
+                    <button type="button" className="cb-btn" onClick={() => gradeSubmission(it)} disabled={busy || fetchingId != null}>{fetchingId === it.id ? (fetchPct != null ? `가져오는 중 ${fetchPct}%` : '가져오는 중...') : it.status === '채점완료' ? '다시 채점' : '채점'}</button>
                     <button type="button" className="cb-btn ghost" onClick={() => setLabeling(it)} disabled={busy} title="학습 자료 만들기">{labelCounts[it.id]?.n ? `공 표시 ${labelCounts[it.id].n}장면` : '공 표시'}</button>
                     <button type="button" className="cb-x" title="영상 지우기" onClick={() => removeSubmission(it)}>✕</button>
                   </div>
                 </li>
               ))}
             </ul>
+          )}
+        </section>
+      )}
+
+      {/* 제출 설정 (로그인 시) */}
+      {apiReady && (
+        <section className="cb-card">
+          <h2>⚙️ 제출 설정 <span className="cb-sub">명렬표 · 촬영 안내 · 촬영 시간 · 영상 저장 위치</span>
+            <button type="button" className="cb-link" style={{ padding: 0, marginLeft: 'auto' }} onClick={() => setShowCfg((v) => !v)}>{showCfg ? '닫기' : '열기'}</button>
+          </h2>
+          {!cfg && <p className="cb-warn">⚠️ 설정을 읽지 못했습니다. 수파베이스 SQL Editor 에서 <code>supabase/catchball_v2.sql</code> 을 실행했는지 확인해 주세요.</p>}
+          {cfg && !showCfg && (
+            <p className="cb-note">명렬표 {cfg.classes.length}개 반 · 촬영 최대 {cfg.maxSeconds}초 · 다시 제출 {cfg.allowResubmit ? '허용' : '막음'} · 영상 저장: {cfg.scriptUrl && cfg.driveKey ? <span className="cb-drive-status ok">구글 드라이브</span> : <span className="cb-drive-status">수파베이스 (1GB)</span>}</p>
+          )}
+          {cfg && showCfg && (
+            <div className="cb-settings">
+              <label>명렬표 <span className="cb-sub">반 이름 줄("1학년 3반") 다음 줄에 이름들을 쉼표나 띄어쓰기로. 학생은 여기서 골라 제출합니다. 비워 두면 이름을 직접 적습니다.</span>
+                <textarea value={cfgDraft.roster} onChange={(e) => setCfgDraft({ ...cfgDraft, roster: e.target.value })} placeholder={'1학년 3반\n김민수, 이영희, 박지훈\n1학년 4반\n...'} />
+              </label>
+              <p className="cb-note" style={{ margin: 0 }}>지금 글로 읽히는 명렬표: {parseRoster(cfgDraft.roster).map((c) => `${c.name} ${c.students.length}명`).join(' · ') || '(없음)'}</p>
+              <label>촬영 안내 <span className="cb-sub">학생 화면 맨 위에 보입니다. 비워 두면 기본 안내.</span>
+                <textarea style={{ minHeight: 70 }} value={cfgDraft.guideText} onChange={(e) => setCfgDraft({ ...cfgDraft, guideText: e.target.value })} placeholder={DEFAULT_GUIDE} />
+              </label>
+              <div className="cb-grid">
+                <label>촬영 최대 시간 (초)<input type="number" min="10" max="600" value={cfgDraft.maxSeconds} onChange={(e) => setCfgDraft({ ...cfgDraft, maxSeconds: e.target.value })} /></label>
+                <label className="cb-check" style={{ alignSelf: 'end' }}><input type="checkbox" checked={cfgDraft.allowResubmit} onChange={(e) => setCfgDraft({ ...cfgDraft, allowResubmit: e.target.checked })} /> 같은 팀이 같은 날 다시 제출할 수 있게</label>
+              </div>
+              <div className="cb-row" style={{ margin: 0, alignItems: 'center' }}>
+                <button type="button" className="cb-btn" onClick={saveCfg} disabled={cfgBusy}>{cfgBusy ? '저장 중...' : '설정 저장'}</button>
+                {cfgMsg && <span className="cb-sub">{cfgMsg}</span>}
+              </div>
+
+              <div className="cb-slider-group">
+                <div className="cb-slider-title">영상 저장 위치: 구글 드라이브 연결 {driveState.status === 'ok' && <span className="cb-drive-status ok">연결됨</span>}</div>
+                <p className="cb-note" style={{ margin: 0 }}>학생 영상을 선생님 구글 드라이브("캐치볼 제출" 폴더)에 저장합니다. 용량 걱정이 없습니다. 연결하려면 <code>apps-script/Code.gs</code> 를 선생님 구글 계정의 앱스크립트로 한 번 배포하고(안내: <code>apps-script/README.md</code>), 그 웹 앱 주소를 아래에 넣고 "연결"을 누르세요. 연결 안 하면 수파베이스 저장소(1GB, 약 150~200편)에 저장됩니다.</p>
+                <label>앱스크립트 웹 앱 주소<input placeholder="https://script.google.com/macros/s/.../exec" value={cfgDraft.scriptUrl} onChange={(e) => setCfgDraft({ ...cfgDraft, scriptUrl: e.target.value })} /></label>
+                {driveState.status === 'needKey' && (
+                  <label>선생님 키 <span className="cb-sub">앱스크립트 프로젝트 설정 › 스크립트 속성의 TEACHER_KEY 값</span><input value={driveKeyInput} onChange={(e) => setDriveKeyInput(e.target.value)} /></label>
+                )}
+                <div className="cb-row" style={{ margin: 0, alignItems: 'center' }}>
+                  <button type="button" className="cb-btn" onClick={connectDrive} disabled={driveState.status === 'checking'}>{driveState.status === 'checking' ? '확인 중...' : driveState.status === 'ok' ? '다시 확인' : '연결'}</button>
+                  {cfg.scriptUrl && <button type="button" className="cb-btn ghost" onClick={disconnectDrive}>연결 끊기</button>}
+                  {driveState.msg && <span className={`cb-sub ${driveState.status === 'bad' ? 'cb-error' : ''}`} style={{ margin: 0 }}>{driveState.msg}</span>}
+                </div>
+              </div>
+            </div>
           )}
         </section>
       )}

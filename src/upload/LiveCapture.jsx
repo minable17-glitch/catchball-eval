@@ -1,49 +1,121 @@
 import { useEffect, useRef, useState } from 'react';
 import { submitVideo } from '../api.js';
-import { canRecord, createLiveAnalyzer, createRecorder, drawLiveOverlay, openCamera, startCandidatePreview, stopStream } from '../live.js';
-import { loadPoseLandmarker } from '../pose.js';
-import { DEFAULT_BALL_PARAMS, sampleBallParams } from '../analysis.js';
+import { canRecord, createRecorder, openCamera, stopStream } from '../live.js';
+import { extractPeople, loadPoseLandmarker } from '../pose.js';
 
 const MB = 1024 * 1024;
+const CHECK_MS = 700;     // 구도 확인 주기
+const EDGE = 0.07;        // 화면 가장자리 기준 (가로 비율)
+const DRIFT = 0.28;       // 표시한 자리에서 이만큼 벗어나면 경고 (가로 비율)
 
 function fmt(sec) { const m = Math.floor(sec / 60), s = Math.floor(sec % 60); return `${m}:${String(s).padStart(2, '0')}`; }
 
 /**
- * 앱 안에서 촬영 → 실시간 카운트 → 촬영 끝나면 자동 제출
- * props: info({date, className, student1, student2}), validate() → 오류문구|null, onDone(result)
+ * 앱 안에서 촬영 → 촬영 끝나면 자동 제출. 횟수는 세지 않음.
+ *  1. 카메라 켜기  2. 화면에서 두 학생이 선 자리를 눌러 표시  3. 촬영 (구도에서 벗어나면 경고, 최대 시간 지나면 자동 종료)  4. 자동 업로드
+ * props: info({date, className, student1, student2}), validate() → 오류문구|null, maxSeconds, scriptUrl, onReset()
  */
-export default function LiveCapture({ info, validate, onDone }) {
-  const [phase, setPhase] = useState('idle'); // idle | opening | ready | recording | uploading | done | error
+export default function LiveCapture({ info, validate, maxSeconds = 60, scriptUrl = '', onReset }) {
+  const [phase, setPhase] = useState('idle'); // idle | opening | mark | ready | recording | uploading | done | error
   const [message, setMessage] = useState('');
   const [progress, setProgress] = useState(0);
-  const [live, setLive] = useState({ stats: { success: 0, fail: 0, bestStreak: 0 }, t: 0, poseMs: 0, poseOn: false });
+  const [elapsed, setElapsed] = useState(0);
+  const [marks, setMarks] = useState([]); // [{x, footY}] 학생1, 학생2 자리 (0~1)
+  const [warn, setWarn] = useState('');   // 구도 경고
+  const [orientNote, setOrientNote] = useState('');
+  const [framingOn, setFramingOn] = useState(false);
   const [result, setResult] = useState(null);
-  const [ballParams, setBallParams] = useState({ ...DEFAULT_BALL_PARAMS });
-  const [ballPicked, setBallPicked] = useState(false);
   const videoRef = useRef(null);
   const overlayRef = useRef(null);
   const streamRef = useRef(null);
-  const analyzerRef = useRef(null);
   const recorderRef = useRef(null);
   const poseRef = useRef(null);
-  const lastEventRef = useRef(null);
-  const lastUiRef = useRef(0);
-  const previewRef = useRef(null);
-  const [candCount, setCandCount] = useState(0);
+  const marksRef = useRef(marks);
+  const badRef = useRef(0);
+  const startAtRef = useRef(0);
+  const stoppingRef = useRef(false);
+  const stopRef = useRef(null); // 시간 초과 시 호출할 촬영 종료 함수
+  useEffect(() => { marksRef.current = marks; }, [marks]);
 
-  // 촬영 전 미리보기에서 공 색 후보를 바로 표시 (공 색을 찍으면 그 기준으로 다시 시작)
+  useEffect(() => () => { stopStream(streamRef.current); }, []);
+
+  // ── 표시 그리기 (두 학생 자리) ──
   useEffect(() => {
-    if (phase !== 'ready') { previewRef.current?.stop(); previewRef.current = null; return; }
-    const v = videoRef.current, c = overlayRef.current;
-    if (!v || !c) return;
-    let n = 0;
-    previewRef.current = startCandidatePreview({ video: v, canvas: c, ballParams, onFrame: (cands) => { if (++n % 8 === 0) setCandCount(cands.length); } });
-    return () => { previewRef.current?.stop(); previewRef.current = null; };
-  }, [phase, ballParams]);
+    const canvas = overlayRef.current, v = videoRef.current;
+    if (!canvas || !v?.videoWidth) return;
+    if (canvas.width !== v.videoWidth || canvas.height !== v.videoHeight) { canvas.width = v.videoWidth; canvas.height = v.videoHeight; }
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height, lw = Math.max(2, W / 320);
+    ctx.clearRect(0, 0, W, H);
+    ctx.font = `bold ${Math.round(W / 32)}px sans-serif`; ctx.textAlign = 'center';
+    const names = [info.student1 || '학생 1', info.student2 || '학생 2'];
+    marks.forEach((m, i) => {
+      const x = m.x * W, y = m.footY * H;
+      ctx.strokeStyle = i === 0 ? '#00c8ff' : '#ffd600'; ctx.lineWidth = lw * 1.5;
+      ctx.beginPath(); ctx.moveTo(x - lw * 10, y); ctx.lineTo(x + lw * 10, y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x, y - lw * 14); ctx.lineTo(x, y); ctx.stroke();
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      const label = names[i];
+      const tw = ctx.measureText(label).width + lw * 6;
+      ctx.fillRect(x - tw / 2, y + lw * 3, tw, W / 32 + lw * 4);
+      ctx.fillStyle = i === 0 ? '#00c8ff' : '#ffd600';
+      ctx.fillText(label, x, y + lw * 3 + W / 32 + lw);
+    });
+    if (phase === 'mark' && marks.length < 2) {
+      // 아직 안 찍은 쪽 안내
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.fillRect(0, 0, W, W / 32 + lw * 8);
+      ctx.fillStyle = '#fff';
+      ctx.fillText(`${names[marks.length]}이(가) 선 자리(발)를 눌러 주세요`, W / 2, W / 32 + lw * 3);
+    }
+  }, [marks, phase, info.student1, info.student2]);
 
-  useEffect(() => () => { analyzerRef.current?.stop?.(); stopStream(streamRef.current); }, []);
+  // ── 구도 확인: 두 사람이 다 보이는지, 가장자리에 붙지 않았는지, 표시한 자리에서 많이 벗어나지 않았는지 ──
+  useEffect(() => {
+    if (!(phase === 'mark' || phase === 'ready' || phase === 'recording')) return;
+    const v = videoRef.current, pose = poseRef.current;
+    if (!v || !pose) return;
+    let stopped = false, running = false;
+    const check = () => {
+      if (stopped || running || !v.videoWidth) return;
+      running = true;
+      try {
+        const res = pose.detectForVideo(v, Math.round(performance.now()));
+        const people = extractPeople(res).filter((p) => p.cx != null);
+        let msg = '';
+        if (people.length < 2) msg = people.length === 0 ? '사람이 보이지 않아요. 두 사람이 모두 화면에 들어오게 해 주세요.' : '한 사람만 보여요. 두 사람이 모두 화면에 들어오게 해 주세요.';
+        else if (people.some((p) => p.cx < EDGE || p.cx > 1 - EDGE)) msg = '화면 가장자리에 너무 가까워요. 뒤로 물러나거나 폰을 돌려 주세요.';
+        else if (marksRef.current.length === 2) {
+          const far = marksRef.current.some((m) => !people.some((p) => Math.abs(p.cx - m.x) < DRIFT));
+          if (far) msg = '표시한 자리에서 많이 벗어났어요. 처음 자리로 돌아가 주세요.';
+        }
+        badRef.current = msg ? badRef.current + 1 : 0;
+        if (msg && badRef.current >= 2) {
+          setWarn((w) => { if (!w && navigator.vibrate) navigator.vibrate(200); return msg; });
+        } else if (!msg) setWarn('');
+      } catch (e) {
+        console.warn('구도 확인 실패', e);
+      } finally { running = false; }
+    };
+    const id = setInterval(check, CHECK_MS);
+    check();
+    return () => { stopped = true; clearInterval(id); };
+  }, [phase, framingOn]);
+
+  // ── 촬영 시간 ──
+  useEffect(() => {
+    if (phase !== 'recording') return;
+    const id = setInterval(() => {
+      const t = (performance.now() - startAtRef.current) / 1000;
+      setElapsed(t);
+      if (t >= maxSeconds) stopRef.current?.(true);
+    }, 250);
+    return () => clearInterval(id);
+  }, [phase, maxSeconds]);
 
   const open = async () => {
+    const err = validate?.();
+    if (err) { setMessage(err); return; }
     setMessage('');
     setPhase('opening');
     try {
@@ -52,60 +124,69 @@ export default function LiveCapture({ info, validate, onDone }) {
       const v = videoRef.current;
       v.srcObject = stream;
       await v.play();
-      // 손·발목 인식 모델 (처음 한 번만 내려받음). 실패하면 공만으로 셈
+      setOrientNote(v.videoWidth && v.videoHeight && v.videoWidth < v.videoHeight ? '📱 폰을 가로로 눕혀서 찍어 주세요. (세로로 찍으면 두 사람이 다 안 들어가요)' : '');
+      // 사람 인식 모델 (구도 확인용). 못 불러오면 경고 없이 진행
       try {
         poseRef.current = poseRef.current || (await loadPoseLandmarker({ numPoses: 2 }));
-        // 첫 인식은 몇 초 걸리므로 촬영 전에 미리 한 번 돌려 둠 (촬영 시작 직후 멈춤 방지)
         try { if (v.videoWidth) poseRef.current.detectForVideo(v, Math.round(performance.now())); } catch { /* 무시 */ }
-        setLive((s) => ({ ...s, poseOn: true }));
+        setFramingOn(true);
       } catch (e) {
         console.warn('포즈 모델 불러오기 실패', e);
-        setMessage('손 인식 모델을 못 불러와 공만으로 셉니다.');
+        setFramingOn(false);
       }
-      setPhase('ready');
+      setMarks([]);
+      setPhase('mark');
     } catch (e) {
       setPhase('error');
       setMessage(e?.message || '카메라를 열 수 없습니다.');
     }
   };
 
+  // 화면을 누른 자리 → 영상 좌표(0~1)
+  const toNorm = (e) => {
+    const v = videoRef.current, canvas = overlayRef.current;
+    if (!v?.videoWidth || !canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    const scale = Math.min(rect.width / v.videoWidth, rect.height / v.videoHeight);
+    const dw = v.videoWidth * scale, dh = v.videoHeight * scale;
+    const nx = (e.clientX - rect.left - (rect.width - dw) / 2) / dw, ny = (e.clientY - rect.top - (rect.height - dh) / 2) / dh;
+    if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return null;
+    return { x: nx, footY: ny };
+  };
+
+  const onOverlayClick = (e) => {
+    if (phase !== 'mark') return;
+    const p = toNorm(e);
+    if (!p) return;
+    const next = [...marks, p].slice(0, 2);
+    setMarks(next);
+    if (next.length === 2) setPhase('ready');
+  };
+
+  const redoMarks = () => { setMarks([]); setPhase('mark'); setMessage(''); };
+
   const startRecording = () => {
     const err = validate?.();
     if (err) { setMessage(err); return; }
-    const v = videoRef.current;
     try {
       recorderRef.current = createRecorder(streamRef.current);
     } catch (e) { setMessage(e?.message || '녹화를 시작할 수 없습니다.'); return; }
-    lastEventRef.current = null;
-    const analyzer = createLiveAnalyzer({
-      video: v,
-      fps: 15,
-      ballParams,
-      poseLandmarker: poseRef.current,
-      onUpdate: ({ frame, recent, stats, events, groundY, poseMs, t, candidates }) => {
-        const latest = events[events.length - 1];
-        if (latest && latest !== lastEventRef.current) { lastEventRef.current = latest; lastEventRef.flashUntil = performance.now() + 900; }
-        const flash = lastEventRef.flashUntil > performance.now() ? lastEventRef.current : null;
-        drawLiveOverlay(overlayRef.current, v, { frame, recent, groundY, stats, event: flash, candidates });
-        const now = performance.now();
-        if (now - lastUiRef.current > 250) { lastUiRef.current = now; setLive((s) => ({ ...s, stats, t, poseMs })); }
-      },
-    });
-    analyzerRef.current = analyzer;
+    stoppingRef.current = false;
+    startAtRef.current = performance.now();
+    setElapsed(0);
     recorderRef.current.start();
-    analyzer.start();
     setMessage('');
     setPhase('recording');
   };
 
-  const stopRecording = async () => {
-    const analyzer = analyzerRef.current, recorder = recorderRef.current;
-    if (!analyzer || !recorder) return;
+  const stopRecording = async (auto = false) => {
+    const recorder = recorderRef.current;
+    if (!recorder || stoppingRef.current) return;
+    stoppingRef.current = true;
+    const duration = Math.round((performance.now() - startAtRef.current) / 1000);
     setPhase('uploading');
-    setProgress(0);
-    const final = analyzer.stop();
-    analyzerRef.current = null;
-    window.__catchballLive = final; // 문제 확인용 (콘솔에서 볼 수 있음)
+    setProgress(0); setWarn('');
+    setMessage(auto ? `${maxSeconds}초가 지나 촬영을 마쳤어요. 올리는 중...` : '');
     let blob;
     try {
       blob = await recorder.stop();
@@ -114,109 +195,93 @@ export default function LiveCapture({ info, validate, onDone }) {
     }
     stopStream(streamRef.current);
     streamRef.current = null;
-    const summary = { stats: final.stats, events: final.events, sizeMb: Math.round(blob.size / MB * 10) / 10, duration: Math.round(final.track[final.track.length - 1]?.t || 0) };
-    setResult(summary);
+    await doUpload(blob, duration);
+  };
+
+  const doUpload = async (blob, duration) => {
+    const base = { sizeMb: Math.round(blob.size / MB * 10) / 10, duration, blob };
+    setResult(base);
     try {
       const ext = /mp4/.test(blob.type) ? 'mp4' : 'webm';
       const r = await submitVideo({
-        info: { className: info.className.trim(), student1: info.student1.trim(), student2: info.student2.trim(), date: info.date },
-        blob,
-        fileName: `${info.student1.trim()}_${info.student2.trim()}.${ext}`,
-        durationSec: summary.duration,
-        extra: { autoSuccess: final.stats.success, autoFail: final.stats.fail, autoEvents: final.events.map((e) => ({ t: e.t, type: e.type })) },
+        info, blob,
+        fileName: `${info.student1}_${info.student2}.${ext}`,
+        durationSec: duration,
+        playerMarks: marksRef.current.length === 2 ? marksRef.current.map((m, i) => ({ x: m.x, footY: m.footY, name: i === 0 ? info.student1 : info.student2 })) : null,
+        scriptUrl,
         onStatus: setMessage,
         onProgress: setProgress,
       });
-      setResult({ ...summary, ...r });
+      setResult({ ...base, ...r, blob: null });
       setPhase('done');
       setMessage('');
-      onDone?.({ ...summary, ...r });
     } catch (e) {
       console.error(e);
       setPhase('error');
       setMessage((e?.message || '올리는 중 문제가 생겼습니다.') + ' 촬영한 영상은 아래 버튼으로 다시 올릴 수 있습니다.');
-      setResult({ ...summary, blob });
     }
   };
+
+  useEffect(() => { stopRef.current = stopRecording; });
 
   const retryUpload = async () => {
     if (!result?.blob) return;
     setPhase('uploading'); setProgress(0);
-    try {
-      const ext = /mp4/.test(result.blob.type) ? 'mp4' : 'webm';
-      const r = await submitVideo({
-        info: { className: info.className.trim(), student1: info.student1.trim(), student2: info.student2.trim(), date: info.date },
-        blob: result.blob, fileName: `${info.student1.trim()}_${info.student2.trim()}.${ext}`,
-        durationSec: result.duration,
-        extra: { autoSuccess: result.stats.success, autoFail: result.stats.fail, autoEvents: result.events.map((e) => ({ t: e.t, type: e.type })) },
-        onStatus: setMessage, onProgress: setProgress,
-      });
-      setResult({ ...result, ...r, blob: null });
-      setPhase('done'); setMessage('');
-    } catch (e) {
-      setPhase('error'); setMessage(e?.message || '다시 올리기에 실패했습니다.');
-    }
-  };
-
-  // 촬영 전 미리보기에서 공을 누르면 그 색으로 기준을 잡음 (조명·공 색이 달라도 정확해짐)
-  const onPreviewClick = (e) => {
-    if (phase !== 'ready') return;
-    const v = videoRef.current, canvas = overlayRef.current;
-    if (!v?.videoWidth || !canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const scale = Math.min(rect.width / v.videoWidth, rect.height / v.videoHeight);
-    const dw = v.videoWidth * scale, dh = v.videoHeight * scale;
-    const nx = (e.clientX - rect.left - (rect.width - dw) / 2) / dw, ny = (e.clientY - rect.top - (rect.height - dh) / 2) / dh;
-    if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return;
-    const w = 960, h = Math.round(v.videoHeight * w / v.videoWidth);
-    const c = document.createElement('canvas'); c.width = w; c.height = h;
-    const ctx = c.getContext('2d', { willReadFrequently: true });
-    ctx.drawImage(v, 0, 0, w, h);
-    const params = sampleBallParams(ctx.getImageData(0, 0, w, h).data, w, h, nx, ny);
-    if (!params) { setMessage('그 자리에서 공 색을 못 잡았어요. 공의 한가운데를 다시 눌러 주세요.'); return; }
-    setBallParams({ ...DEFAULT_BALL_PARAMS, ...params });
-    setBallPicked(true);
-    setMessage(`공 색을 잡았어요 (색상 ${params.sample.h}). 이제 촬영을 시작하세요.`);
+    await doUpload(result.blob, result.duration);
   };
 
   if (!canRecord()) {
     return <p className="cb-error">이 브라우저는 앱 안 촬영을 지원하지 않습니다. "찍어 둔 영상 올리기"를 이용해 주세요.</p>;
   }
 
+  const showVideo = phase === 'mark' || phase === 'ready' || phase === 'recording';
+  const remain = Math.max(0, maxSeconds - elapsed);
+
   return (
     <div className="cb-live">
-      <div className={`cb-video-wrap ${phase === 'idle' || phase === 'opening' ? 'is-hidden' : ''}`}>
+      <div className={`cb-video-wrap ${showVideo ? '' : 'is-hidden'}`}>
         <video ref={videoRef} playsInline muted autoPlay />
-        <canvas ref={overlayRef} className={`cb-overlay ${phase === 'ready' ? 'clickable' : ''}`} onClick={onPreviewClick} />
+        <canvas ref={overlayRef} className={`cb-overlay ${phase === 'mark' ? 'clickable' : ''}`} onClick={onOverlayClick} />
         {phase === 'recording' && (
-          <div className="cb-rec-badge"><span className="dot" /> 촬영 중 {fmt(live.t)}{live.poseOn ? '' : ' · 공만 인식'}</div>
+          <div className="cb-rec-badge"><span className="dot" /> 촬영 중 {fmt(elapsed)} · 남은 시간 {fmt(remain)}</div>
         )}
+        {warn && showVideo && <div className="cb-frame-warn">⚠️ {warn}</div>}
       </div>
 
       {phase === 'idle' && (
-        <button type="button" className="cb-btn big" onClick={open}>📷 카메라 켜기</button>
+        <>
+          <p className="cb-note">반과 이름을 고른 뒤 카메라를 켜세요. 촬영 중에는 횟수를 세지 않습니다. 선생님이 영상을 보고 채점합니다.</p>
+          <button type="button" className="cb-btn big" onClick={open}>📷 카메라 켜기</button>
+          {message && <p className="cb-error">{message}</p>}
+        </>
       )}
-      {phase === 'opening' && <p className="cb-note">카메라와 인식 모델을 준비하는 중... (처음 한 번은 몇 초 걸립니다)</p>}
+      {phase === 'opening' && <p className="cb-note">카메라를 준비하는 중... (처음 한 번은 몇 초 걸립니다)</p>}
+      {phase === 'mark' && (
+        <>
+          {orientNote && <p className="cb-warn">{orientNote}</p>}
+          <p className="cb-note"><b>{marks.length === 0 ? `${info.student1}이(가)` : `${info.student2}이(가)`} 선 자리(발 근처)를 화면에서 눌러 주세요.</b> 두 사람이 옆모습으로 모두 보이게 휴대폰을 고정한 뒤에 누르세요. {framingOn ? '두 사람이 화면에서 벗어나면 경고가 뜹니다.' : '(사람 인식 모델을 못 불러와 구도 경고는 뜨지 않습니다)'}</p>
+          {marks.length > 0 && <button type="button" className="cb-btn ghost" onClick={redoMarks}>자리 다시 찍기</button>}
+        </>
+      )}
       {phase === 'ready' && (
         <>
-          <p className="cb-note">두 사람이 옆모습으로 화면에 다 들어오게 휴대폰을 고정하세요. <b>화면 속 공을 한 번 눌러</b> 공 색을 알려 주면 더 정확합니다{ballPicked ? ' (잡았어요 ✅)' : ''}. 주황 원이 공 위에 뜨면 잘 보고 있는 것입니다{candCount > 8 ? ' (지금은 공 아닌 것도 많이 잡히고 있어요. 공을 눌러 색을 알려 주세요)' : ''}. 준비되면 촬영을 시작하세요.</p>
-          <button type="button" className="cb-btn big" onClick={startRecording}>⏺ 촬영 시작</button>
+          {orientNote && <p className="cb-warn">{orientNote}</p>}
+          <p className="cb-note">두 사람 자리를 표시했어요 ✅. 준비되면 촬영을 시작하세요. 최대 {maxSeconds}초이고, 시간이 되면 자동으로 끝나고 올라갑니다.</p>
+          <div className="cb-row" style={{ margin: 0 }}>
+            <button type="button" className="cb-btn big" style={{ flex: 1 }} onClick={startRecording}>⏺ 촬영 시작</button>
+            <button type="button" className="cb-btn ghost" onClick={redoMarks}>자리 다시 찍기</button>
+          </div>
         </>
       )}
       {phase === 'recording' && (
         <>
-          <div className="cb-stats" style={{ marginTop: 10 }}>
-            <div className="cb-stat ok"><b>{live.stats.success}</b><span>성공</span></div>
-            <div className="cb-stat bad"><b>{live.stats.fail}</b><span>실패</span></div>
-            <div className="cb-stat"><b>{live.stats.bestStreak}</b><span>최대 연속</span></div>
-            <div className="cb-stat"><b>{fmt(live.t)}</b><span>시간</span></div>
-          </div>
-          <button type="button" className="cb-btn big bad-solid" onClick={stopRecording}>⏹ 촬영 끝 (자동으로 올라갑니다)</button>
+          <p className="cb-note">촬영 중입니다. 다 하면 아래 버튼을 누르세요. 남은 시간 <b>{fmt(remain)}</b></p>
+          <button type="button" className="cb-btn big bad-solid" onClick={() => stopRecording(false)}>⏹ 촬영 끝 (자동으로 올라갑니다)</button>
         </>
       )}
       {phase === 'uploading' && (
         <div className="cb-upload-progress">
-          {result && <p className="cb-note">촬영 중 센 결과: 성공 {result.stats.success} · 실패 {result.stats.fail} ({result.sizeMb}MB)</p>}
+          {result && <p className="cb-note">촬영 {fmt(result.duration)} · {result.sizeMb}MB</p>}
           <div className="cb-progress-bar"><div style={{ width: `${Math.round(progress * 100)}%` }} /></div>
           <div className="cb-progress-text dark">{message || '올리는 중'} {Math.round(progress * 100)}%</div>
         </div>
@@ -224,13 +289,9 @@ export default function LiveCapture({ info, validate, onDone }) {
       {phase === 'done' && result && (
         <div className="cb-done">
           <h2>✅ 제출 완료!</h2>
-          <div className="cb-stats">
-            <div className="cb-stat ok"><b>{result.stats.success}</b><span>성공</span></div>
-            <div className="cb-stat bad"><b>{result.stats.fail}</b><span>실패</span></div>
-            <div className="cb-stat"><b>{result.stats.bestStreak}</b><span>최대 연속</span></div>
-            <div className="cb-stat"><b>{fmt(result.duration)}</b><span>길이</span></div>
-          </div>
-          <p className="cb-note">자동으로 센 횟수는 참고용이고, 선생님이 영상을 보고 최종 확인합니다.</p>
+          <p className="cb-big">{info.className} · {info.student1} · {info.student2}</p>
+          <p className="cb-note">촬영 {fmt(result.duration)} · {result.sizeMb}MB · {result.storage === 'drive' ? '선생님 구글 드라이브에 저장됨' : '서버에 저장됨'}. 선생님이 영상을 보고 채점합니다.</p>
+          <button type="button" className="cb-btn big" onClick={() => onReset?.()}>다른 팀 영상 올리기</button>
         </div>
       )}
       {phase === 'error' && (
@@ -238,11 +299,11 @@ export default function LiveCapture({ info, validate, onDone }) {
           <p className="cb-error">⚠️ {message}</p>
           <div className="cb-row">
             {result?.blob && <button type="button" className="cb-btn" onClick={retryUpload}>다시 올리기</button>}
-            <button type="button" className="cb-btn ghost" onClick={() => { setPhase('idle'); setMessage(''); setResult(null); }}>처음부터</button>
+            <button type="button" className="cb-btn ghost" onClick={() => { setPhase('idle'); setMessage(''); setResult(null); setMarks([]); }}>처음부터</button>
           </div>
         </>
       )}
-      {message && (phase === 'ready' || phase === 'recording') && <p className="cb-note">{message}</p>}
+      {message && (phase === 'ready' || phase === 'recording' || phase === 'mark') && <p className="cb-error">{message}</p>}
     </div>
   );
 }
