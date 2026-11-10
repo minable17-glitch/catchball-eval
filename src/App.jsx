@@ -55,6 +55,7 @@ export default function App() {
   const [calibStep, setCalibStep] = useState(0); // 0 공, 1 왼쪽 아이 발, 2 오른쪽 아이 발, 3 끝
   const [calibMsg, setCalibMsg] = useState('');
   const [calibTime, setCalibTime] = useState(0.5);
+  const [calibMag, setCalibMag] = useState(null); // 공을 잡은 자리 확대 그림
   const [showSettings, setShowSettings] = useState(false);
   const [maskPreview, setMaskPreview] = useState(null); // { url, found }
   // ── 분석 상태 ──
@@ -318,10 +319,17 @@ export default function App() {
       const ctx = c.getContext('2d', { willReadFrequently: true });
       ctx.drawImage(video, 0, 0, w, h);
       const params = sampleBallParams(ctx.getImageData(0, 0, w, h).data, w, h, nx, ny);
-      if (!params) { setCalibMsg('그 자리에서 공 색을 못 잡았어요. 공의 한가운데를 다시 눌러 주세요. (공이 안 보이는 장면이면 아래 막대로 장면을 옮기세요)'); return; }
-      setCalib((c0) => ({ ...c0, ball: { x: nx, y: ny }, params }));
+      if (!params) { setCalibMsg('그 근처에서 공 색을 못 잡았어요. 공에 더 가깝게 눌러 주세요. (공이 안 보이는 장면이면 아래 막대나 ◀ ▶ 로 장면을 옮기세요)'); return; }
+      const center = params.center || { x: nx, y: ny };
+      setCalib((c0) => ({ ...c0, ball: center, params }));
       setBallParams({ ...DEFAULT_BALL_PARAMS, ...params });
-      setCalibMsg(`공 색을 잡았어요 (색상 ${params.sample.h}, 크기 ${params.sample.area}px). 이제 왼쪽 아이의 발을 눌러 주세요.`);
+      // 확대경: 잡은 자리 주변을 크게 보여줘서 정말 공인지 확인할 수 있게
+      const mag = document.createElement('canvas'); mag.width = 180; mag.height = 180;
+      const mctx = mag.getContext('2d'); mctx.imageSmoothingEnabled = false;
+      mctx.drawImage(c, Math.round(center.x * w) - 30, Math.round(center.y * h) - 30, 60, 60, 0, 0, 180, 180);
+      mctx.strokeStyle = '#ff3b30'; mctx.lineWidth = 2; mctx.beginPath(); mctx.arc(90, 90, 18, 0, Math.PI * 2); mctx.stroke();
+      setCalibMag(mag.toDataURL());
+      setCalibMsg(`공 색을 잡았어요 (색상 ${params.sample.h}, 크기 ${params.sample.area}px). 오른쪽 확대 그림의 빨간 원 안이 공이 맞으면, 이제 왼쪽 아이의 발을 눌러 주세요. 아니면 공을 다시 눌러 주세요.`);
       setCalibStep(1);
     } else if (calibStep === 1 || calibStep === 2) {
       setCalib((c0) => ({ ...c0, players: [...c0.players, { x: nx, footY: ny }] }));
@@ -331,7 +339,10 @@ export default function App() {
   };
 
   const seekCalib = (t) => { setCalibTime(t); const v = videoRef.current; if (v) v.currentTime = t; };
-  const resetCalib = () => { setCalib({ ball: null, params: null, players: [] }); setCalibStep(0); setCalibMsg(''); setBallParams({ ...DEFAULT_BALL_PARAMS }); };
+  const resetCalib = () => { setCalib({ ball: null, params: null, players: [] }); setCalibStep(0); setCalibMsg(''); setCalibMag(null); setBallParams({ ...DEFAULT_BALL_PARAMS }); };
+  const stepCalib = (d) => { const v = videoRef.current; if (!v) return; const t = Math.max(0, Math.min((v.duration || 0) - 0.05, (v.currentTime || 0) + d)); seekCalib(Math.round(t * 100) / 100); };
+  // 공 단계에서는 다른 공을 다시 누르면 교체되도록 허용
+  const redoBall = () => { setCalibStep(0); setCalibMsg('공의 한가운데를 다시 눌러 주세요.'); };
   const openCalib = () => { const v = videoRef.current; if (!v) return; if (abortRef.current) abortRef.current.abort(); v.pause(); setCalibTime(v.currentTime); setStatus('calibrate'); };
 
   const startAnalysis = async () => {
@@ -571,11 +582,20 @@ export default function App() {
                   <span className={calibStep === 1 ? 'on' : calibStep > 1 ? 'ok' : ''}>② 왼쪽 아이 발</span>
                   <span className={calibStep === 2 ? 'on' : calibStep > 2 ? 'ok' : ''}>③ 오른쪽 아이 발</span>
                 </div>
-                <div className="cb-calib-msg">{calibMsg || '영상 위에서 공의 한가운데를 눌러 주세요. 공이 안 보이면 아래 막대로 공이 보이는 장면을 찾으세요.'}</div>
-                <input type="range" min="0" max={Math.max(0.1, (duration || 1) - 0.05)} step="0.1" value={calibTime} onChange={(e) => seekCalib(Number(e.target.value))} aria-label="장면 고르기" />
+                <div className="cb-calib-body">
+                  <div className="cb-calib-msg">{calibMsg || '영상 위에서 공을 눌러 주세요. 날아가는 공처럼 작아도 근처를 누르면 가장 가까운 공 색 자리로 맞춰 잡습니다. 공이 안 보이면 아래 막대나 ◀ ▶ 로 장면을 옮기세요.'}</div>
+                  {calibMag && <img className="cb-calib-mag" src={calibMag} alt="공을 잡은 자리 확대" />}
+                </div>
+                <div className="cb-row" style={{ margin: 0, alignItems: 'center' }}>
+                  <button type="button" className="cb-btn ghost" onClick={() => stepCalib(-1 / 15)}>◀ 한 장 앞</button>
+                  <input type="range" min="0" max={Math.max(0.1, (duration || 1) - 0.05)} step="0.05" value={calibTime} onChange={(e) => seekCalib(Number(e.target.value))} aria-label="장면 고르기" style={{ flex: 1, minWidth: 120 }} />
+                  <button type="button" className="cb-btn ghost" onClick={() => stepCalib(1 / 15)}>한 장 뒤 ▶</button>
+                  <span className="cb-sub">{fmtTime(calibTime)}</span>
+                </div>
                 <div className="cb-row" style={{ margin: 0 }}>
                   <button type="button" className="cb-btn" onClick={startAnalysis}>{calibStep === 0 ? '찍지 않고 자동으로 채점 시작' : '채점 시작'}</button>
                   {calibStep === 0 && <button type="button" className="cb-btn ghost" onClick={() => { setCalibStep(1); setCalibMsg('공은 자동으로 찾습니다. 왼쪽 아이의 발을 눌러 주세요.'); }}>공은 건너뛰고 아이만 찍기</button>}
+                  {calibStep > 0 && <button type="button" className="cb-btn ghost" onClick={redoBall}>공 다시 찍기</button>}
                   <button type="button" className="cb-btn ghost" onClick={resetCalib} disabled={calibStep === 0}>다시 찍기</button>
                 </div>
               </div>

@@ -136,3 +136,6 @@ input[type="range"] { width: 100%; accent-color: var(--cb-accent-dark); }
 .cb-calib-steps span.ok { background: rgba(52,199,89,0.85); }
 .cb-calib-msg { font-size: 0.9rem; line-height: 1.4; }
 .cb-calib input[type="range"] { accent-color: var(--cb-accent); }
+.cb-calib-body { display: flex; gap: 10px; align-items: flex-start; }
+.cb-calib-body .cb-calib-msg { flex: 1; min-width: 0; }
+.cb-calib-mag { width: 90px; height: 90px; border-radius: 8px; border: 1px solid var(--cb-line); background: #000; flex: none; image-rendering: pixelated; }

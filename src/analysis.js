@@ -262,19 +262,41 @@ export function pickBall(blobs, width, height, p = DEFAULT_BALL_PARAMS, prev = n
 // 채점자가 화면에서 공을 눌렀을 때: 그 자리 주변 픽셀의 색과 크기로 공 색 기준값을 만듦.
 // (nx, ny: 0~1 좌표) 반환: 기준값 객체 또는 null(그 자리에 색이 뚜렷한 덩어리가 없음)
 export function sampleBallParams(data, width, height, nx, ny, radiusPx = 12) {
-  const cx = Math.round(nx * width), cy = Math.round(ny * height);
+  let cx = Math.round(nx * width), cy = Math.round(ny * height);
   const med = (arr) => { const a = arr.slice().sort((p, q) => p - q); return a[Math.floor(a.length / 2)]; };
   const hueDiff = (a, b) => { const d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; };
-  // 1) 누른 자리 바로 주변(반지름 3px)의 색으로 '공 색'을 정함 (주변 잔디·흙이 섞이지 않게)
+  // 0) 날아가는 공은 화면에서 몇 픽셀밖에 안 돼 정확히 누르기 어려움 → 누른 자리 주변(반지름 snapPx)에서
+  //    색이 뚜렷한 가장 가까운 점으로 자리를 옮김 (하늘·흙·잔디처럼 채도가 낮은 배경은 건너뜀)
+  const snapPx = Math.max(12, Math.round(width / 40));
+  {
+    let bestD = Infinity, bx = cx, by = cy;
+    for (let y = Math.max(0, cy - snapPx); y <= Math.min(height - 1, cy + snapPx); y++) {
+      for (let x = Math.max(0, cx - snapPx); x <= Math.min(width - 1, cx + snapPx); x++) {
+        const j = (y * width + x) * 4;
+        const [h, sat, v] = rgbToHsv(data[j], data[j + 1], data[j + 2]);
+        // 하늘(파랑)·잔디(초록)는 공이 아님: 주황~노랑~빨강 계열만 후보
+        const warm = h <= 75 || h >= 330;
+        if (sat >= 0.3 && v >= 0.35 && warm) {
+          const d = Math.hypot(x - cx, y - cy);
+          if (d < bestD) { bestD = d; bx = x; by = y; }
+        }
+      }
+    }
+    if (bestD === Infinity) return null;
+    cx = bx; cy = by;
+  }
+  // 1) 옮긴 자리의 색을 기준으로, 바로 주변(반지름 3px)에서 비슷한 색만 모아 '공 색'을 정함 (하늘·잔디·흙이 섞이지 않게)
+  const j0 = (cy * width + cx) * 4;
+  const hSeed = rgbToHsv(data[j0], data[j0 + 1], data[j0 + 2])[0];
   const core = [];
   for (let y = Math.max(0, cy - 3); y <= Math.min(height - 1, cy + 3); y++) {
     for (let x = Math.max(0, cx - 3); x <= Math.min(width - 1, cx + 3); x++) {
       const j = (y * width + x) * 4;
       const [h, sat, v] = rgbToHsv(data[j], data[j + 1], data[j + 2]);
-      if (sat >= 0.25 && v >= 0.3) core.push(h);
+      if (sat >= 0.25 && v >= 0.3 && hueDiff(h, hSeed) <= 25) core.push(h);
     }
   }
-  if (core.length < 6) return null;
+  if (core.length < 4) return null;
   const h0 = med(core);
   // 2) 더 넓은 범위에서 그 색과 비슷한(±25도) 픽셀만 모음
   const hs = [], ss = [], vs = [];
@@ -302,7 +324,8 @@ export function sampleBallParams(data, width, height, nx, ny, radiusPx = 12) {
   const blobs = findBlobs(mask, width, height, { minArea: 2 });
   let best = null;
   for (const b of blobs) { const d = Math.hypot(b.cx - cx, b.cy - cy); if (d < radiusPx * 1.5 && (!best || b.area > best.area)) best = b; }
-  return { ...params, sample: { h: Math.round(h), s: Math.round(sat * 100) / 100, v: Math.round(v * 100) / 100, area: best ? best.area : hs.length } };
+  const center = best ? { x: best.cx / width, y: best.cy / height } : { x: cx / width, y: cy / height };
+  return { ...params, center, sample: { h: Math.round(h), s: Math.round(sat * 100) / 100, v: Math.round(v * 100) / 100, area: best ? best.area : hs.length } };
 }
 
 // 한 프레임의 공 후보 전부 (색·크기·모양 기준 통과, 고정물 제외). 0~1 좌표. 모양 점수 높은 순.
