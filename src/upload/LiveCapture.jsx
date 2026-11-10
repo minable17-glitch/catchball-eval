@@ -47,7 +47,8 @@ export default function LiveCapture({ info, validate, maxSeconds = 60, useDrive 
     const ctx = canvas.getContext('2d');
     const W = canvas.width, H = canvas.height, lw = Math.max(2, W / 320);
     ctx.clearRect(0, 0, W, H);
-    ctx.font = `bold ${Math.round(W / 32)}px sans-serif`; ctx.textAlign = 'center';
+    const fs = Math.round(W / 48);
+    ctx.font = `bold ${fs}px sans-serif`; ctx.textAlign = 'center';
     const names = [info.student1 || '학생 1', info.student2 || '학생 2'];
     marks.forEach((m, i) => {
       const x = m.x * W, y = m.footY * H;
@@ -57,18 +58,22 @@ export default function LiveCapture({ info, validate, maxSeconds = 60, useDrive 
       ctx.fillStyle = 'rgba(0,0,0,0.55)';
       const label = names[i];
       const tw = ctx.measureText(label).width + lw * 6;
-      ctx.fillRect(x - tw / 2, y + lw * 3, tw, W / 32 + lw * 4);
+      ctx.fillRect(x - tw / 2, y + lw * 3, tw, fs + lw * 4);
       ctx.fillStyle = i === 0 ? '#00c8ff' : '#ffd600';
-      ctx.fillText(label, x, y + lw * 3 + W / 32 + lw);
+      ctx.fillText(label, x, y + lw * 3 + fs + lw);
     });
-    if (phase === 'mark' && marks.length < 2) {
-      // 아직 안 찍은 쪽 안내
-      ctx.fillStyle = 'rgba(0,0,0,0.5)';
-      ctx.fillRect(0, 0, W, W / 32 + lw * 8);
-      ctx.fillStyle = '#fff';
-      ctx.fillText(`${names[marks.length]}이(가) 선 자리(발)를 눌러 주세요`, W / 2, W / 32 + lw * 3);
-    }
   }, [marks, phase, info.student1, info.student2]);
+
+  // ── 카메라 화면을 전체 화면으로 쓰는 동안: 뒤 페이지 스크롤 막기, 화면 꺼짐 막기 ──
+  const fullScreen = phase === 'mark' || phase === 'ready' || phase === 'recording';
+  useEffect(() => {
+    if (!fullScreen) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    let lock = null;
+    navigator.wakeLock?.request('screen').then((l) => { lock = l; }).catch(() => {});
+    return () => { document.body.style.overflow = prev; lock?.release?.().catch(() => {}); };
+  }, [fullScreen]);
 
   // ── 구도 확인: 두 사람이 다 보이는지, 가장자리에 붙지 않았는지, 표시한 자리에서 많이 벗어나지 않았는지 ──
   useEffect(() => {
@@ -164,6 +169,7 @@ export default function LiveCapture({ info, validate, maxSeconds = 60, useDrive 
   };
 
   const redoMarks = () => { setMarks([]); setPhase('mark'); setMessage(''); };
+  const closeCamera = () => { stopStream(streamRef.current); streamRef.current = null; setMarks([]); setWarn(''); setMessage(''); setPhase('idle'); };
 
   const startRecording = () => {
     const err = validate?.();
@@ -239,46 +245,43 @@ export default function LiveCapture({ info, validate, maxSeconds = 60, useDrive 
 
   return (
     <div className="cb-live">
-      <div className={`cb-video-wrap ${showVideo ? '' : 'is-hidden'}`}>
-        <video ref={videoRef} playsInline muted autoPlay />
-        <canvas ref={overlayRef} className={`cb-overlay ${phase === 'mark' ? 'clickable' : ''}`} onClick={onOverlayClick} />
-        {phase === 'recording' && (
-          <div className="cb-rec-badge"><span className="dot" /> 촬영 중 {fmt(elapsed)} · 남은 시간 {fmt(remain)}</div>
-        )}
-        {warn && showVideo && <div className="cb-frame-warn">⚠️ {warn}</div>}
+      <div className={`cb-cam ${showVideo ? 'is-full' : 'is-hidden'}`}>
+        <div className="cb-cam-view">
+          <video ref={videoRef} playsInline muted autoPlay />
+          <canvas ref={overlayRef} className={`cb-overlay ${phase === 'mark' ? 'clickable' : ''}`} onClick={onOverlayClick} />
+          <div className="cb-cam-top">
+            {phase === 'mark' && <span className="cb-cam-pill">👆 <b>{marks.length === 0 ? info.student1 : info.student2}</b> 선 자리(발)를 누르세요 ({marks.length + 1}/2)</span>}
+            {phase === 'ready' && <span className="cb-cam-pill ok">✅ 두 사람 자리 표시 완료 · 최대 {maxSeconds}초</span>}
+            {phase === 'recording' && <span className="cb-cam-pill rec"><span className="dot" /> 촬영 중 {fmt(elapsed)} · 남은 시간 {fmt(remain)}</span>}
+            {warn && <span className="cb-cam-pill warn">⚠️ {warn}</span>}
+            {orientNote && phase !== 'recording' && <span className="cb-cam-pill">{orientNote}</span>}
+            {message && <span className="cb-cam-pill warn">{message}</span>}
+          </div>
+        </div>
+        <div className="cb-cam-bar">
+          {phase === 'mark' && (<>
+            <button type="button" className="cb-btn ghost" onClick={closeCamera}>닫기</button>
+            {marks.length > 0 && <button type="button" className="cb-btn ghost" onClick={redoMarks}>자리 다시 찍기</button>}
+          </>)}
+          {phase === 'ready' && (<>
+            <button type="button" className="cb-btn ghost" onClick={closeCamera}>닫기</button>
+            <button type="button" className="cb-cam-shutter" onClick={startRecording} aria-label="촬영 시작"><span /></button>
+            <button type="button" className="cb-btn ghost" onClick={redoMarks}>자리 다시</button>
+          </>)}
+          {phase === 'recording' && (
+            <button type="button" className="cb-cam-shutter is-rec" onClick={() => stopRecording(false)} aria-label="촬영 끝 (자동으로 올라갑니다)"><span /></button>
+          )}
+        </div>
       </div>
 
       {phase === 'idle' && (
         <>
-          <p className="cb-note">반과 이름을 고른 뒤 카메라를 켜세요. 촬영 중에는 횟수를 세지 않습니다. 선생님이 영상을 보고 채점합니다.</p>
+          <p className="cb-note">반과 이름을 고른 뒤 카메라를 켜세요. 카메라가 화면 전체로 열립니다. 촬영 중에는 횟수를 세지 않고, 선생님이 영상을 보고 채점합니다.</p>
           <button type="button" className="cb-btn big" onClick={open}>📷 카메라 켜기</button>
           {message && <p className="cb-error">{message}</p>}
         </>
       )}
       {phase === 'opening' && <p className="cb-note">카메라를 준비하는 중... (처음 한 번은 몇 초 걸립니다)</p>}
-      {phase === 'mark' && (
-        <>
-          {orientNote && <p className="cb-warn">{orientNote}</p>}
-          <p className="cb-note"><b>{marks.length === 0 ? `${info.student1}이(가)` : `${info.student2}이(가)`} 선 자리(발 근처)를 화면에서 눌러 주세요.</b> 두 사람이 옆모습으로 모두 보이게 휴대폰을 고정한 뒤에 누르세요. {framingOn ? '두 사람이 화면에서 벗어나면 경고가 뜹니다.' : '(사람 인식 모델을 못 불러와 구도 경고는 뜨지 않습니다)'}</p>
-          {marks.length > 0 && <button type="button" className="cb-btn ghost" onClick={redoMarks}>자리 다시 찍기</button>}
-        </>
-      )}
-      {phase === 'ready' && (
-        <>
-          {orientNote && <p className="cb-warn">{orientNote}</p>}
-          <p className="cb-note">두 사람 자리를 표시했어요 ✅. 준비되면 촬영을 시작하세요. 최대 {maxSeconds}초이고, 시간이 되면 자동으로 끝나고 올라갑니다.</p>
-          <div className="cb-row" style={{ margin: 0 }}>
-            <button type="button" className="cb-btn big" style={{ flex: 1 }} onClick={startRecording}>⏺ 촬영 시작</button>
-            <button type="button" className="cb-btn ghost" onClick={redoMarks}>자리 다시 찍기</button>
-          </div>
-        </>
-      )}
-      {phase === 'recording' && (
-        <>
-          <p className="cb-note">촬영 중입니다. 다 하면 아래 버튼을 누르세요. 남은 시간 <b>{fmt(remain)}</b></p>
-          <button type="button" className="cb-btn big bad-solid" onClick={() => stopRecording(false)}>⏹ 촬영 끝 (자동으로 올라갑니다)</button>
-        </>
-      )}
       {phase === 'uploading' && (
         <div className="cb-upload-progress">
           {result && <p className="cb-note">촬영 {fmt(result.duration)} · {result.sizeMb}MB</p>}
@@ -303,7 +306,6 @@ export default function LiveCapture({ info, validate, maxSeconds = 60, useDrive 
           </div>
         </>
       )}
-      {message && (phase === 'ready' || phase === 'recording' || phase === 'mark') && <p className="cb-error">{message}</p>}
     </div>
   );
 }

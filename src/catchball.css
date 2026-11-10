@@ -156,3 +156,26 @@ input[type="range"] { width: 100%; accent-color: var(--cb-accent-dark); }
 .cb-drive-status.ok { background: rgba(52,199,89,0.2); color: #1b6b32; }
 .cb-drive-status.bad { background: rgba(255,59,48,0.15); color: #a4262c; }
 .cb-settings textarea { font: inherit; width: 100%; min-height: 120px; padding: 10px 12px; border: 1px solid var(--cb-line); border-radius: 10px; box-sizing: border-box; }
+
+/* 촬영 화면: 카메라를 화면 전체로 */
+.cb-cam.is-hidden { display: none; }
+.cb-cam.is-full { position: fixed; inset: 0; z-index: 100; background: #000; display: flex; flex-direction: column; }
+.cb-cam-view { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+.cb-cam-view video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+.cb-cam-view .cb-overlay { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.cb-cam-top { position: absolute; top: calc(env(safe-area-inset-top, 0px) + 8px); left: 8px; right: 8px; display: flex; flex-direction: column; align-items: center; gap: 6px; pointer-events: none; }
+.cb-cam-pill { background: rgba(0,0,0,0.6); color: #fff; font-size: 0.88rem; line-height: 1.35; padding: 5px 12px; border-radius: 999px; max-width: 100%; text-align: center; display: inline-flex; align-items: center; gap: 6px; }
+.cb-cam-pill.ok { background: rgba(21,128,61,0.8); }
+.cb-cam-pill.warn { background: rgba(220,38,38,0.85); font-weight: 700; }
+.cb-cam-pill.rec .dot { width: 9px; height: 9px; border-radius: 50%; background: #ff3b30; animation: cb-blink 1s infinite; }
+.cb-cam-bar { display: flex; gap: 14px; justify-content: center; align-items: center; padding: 10px 16px calc(10px + env(safe-area-inset-bottom, 0px)); background: #000; min-height: 84px; }
+.cb-cam-bar .cb-btn.ghost { background: rgba(255,255,255,0.12); color: #fff; border-color: rgba(255,255,255,0.3); }
+.cb-cam-shutter { width: 68px; height: 68px; border-radius: 50%; border: 4px solid #fff; background: transparent; padding: 0; display: grid; place-items: center; cursor: pointer; flex: none; }
+.cb-cam-shutter span { width: 52px; height: 52px; border-radius: 50%; background: #ff3b30; transition: all 0.15s; }
+.cb-cam-shutter.is-rec span { width: 26px; height: 26px; border-radius: 6px; }
+/* 가로로 들었을 때: 버튼을 오른쪽 세로 줄로 (영상을 최대한 크게) */
+@media (orientation: landscape) and (max-height: 600px) {
+  .cb-cam.is-full { flex-direction: row; }
+  .cb-cam-bar { flex-direction: column; min-height: 0; min-width: 96px; padding: 12px calc(12px + env(safe-area-inset-right, 0px)) 12px 12px; }
+  .cb-cam-bar .cb-btn { font-size: 0.82rem; padding: 8px 10px; }
+}
