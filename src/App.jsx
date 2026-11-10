@@ -4,7 +4,7 @@ import { analyzeVideo, previewMask } from './analyzer.js';
 import { loadPoseLandmarker } from './pose.js';
 import { addRecord, deleteRecord, exportRecordsToExcel, loadRecords, todayKST } from './records.js';
 import { DEFAULT_GUIDE, deleteSubmission, fetchVideo, getSavedTeacherUsername, getSettings, listLabelCounts, listResults, listSubmissions, parseRoster, saveResult, setSetting, teacherLogin, teacherLogout, teacherMe, teacherSignup } from './api.js';
-import { isValidScriptUrl, makeTeacherKey, pingScript, setupScript } from './drive.js';
+import { disconnectDrive as driveDisconnect, driveStatus, startDriveConnect } from './drive.js';
 import Label from './Label.jsx';
 
 const FPS_OPTIONS = [
@@ -87,12 +87,11 @@ export default function App() {
   const [currentSubmissionId, setCurrentSubmissionId] = useState(null);
   // ── 제출 설정 (명렬표, 촬영 안내, 촬영 시간, 드라이브 연결) ──
   const [cfg, setCfg] = useState(null); // 서버에서 읽은 설정
-  const [cfgDraft, setCfgDraft] = useState({ roster: '', guideText: '', maxSeconds: 60, allowResubmit: true, scriptUrl: '' });
+  const [cfgDraft, setCfgDraft] = useState({ roster: '', guideText: '', maxSeconds: 60, allowResubmit: true });
   const [cfgMsg, setCfgMsg] = useState('');
   const [cfgBusy, setCfgBusy] = useState(false);
   const [showCfg, setShowCfg] = useState(false);
-  const [driveState, setDriveState] = useState({ status: 'none', msg: '' }); // none | checking | ok | bad | needKey
-  const [driveKeyInput, setDriveKeyInput] = useState('');
+  const [driveState, setDriveState] = useState({ status: 'none', msg: '', email: '' }); // none | checking | ok | bad
   const pendingMarksRef = useRef(null);
   const apiReady = !!teacher;
 
@@ -123,8 +122,8 @@ export default function App() {
     setLabelCounts(counts || {});
     if (st) {
       setCfg(st);
-      setCfgDraft({ roster: st.roster, guideText: st.guideText, maxSeconds: st.maxSeconds, allowResubmit: st.allowResubmit, scriptUrl: st.scriptUrl });
-      setDriveState(st.scriptUrl && st.driveKey ? { status: 'ok', msg: '연결됨' } : { status: 'none', msg: '' });
+      setCfgDraft({ roster: st.roster, guideText: st.guideText, maxSeconds: st.maxSeconds, allowResubmit: st.allowResubmit });
+      setDriveState((d) => (d.status === 'checking' || d.msg ? d : st.driveOn ? { status: 'ok', msg: '', email: st.driveEmail } : { status: 'none', msg: '', email: '' }));
     }
   }, []);
 
@@ -196,36 +195,41 @@ export default function App() {
     } finally { setCfgBusy(false); }
   };
 
+  // 구글 드라이브 연결: 구글 허락 화면으로 갔다가 이 화면으로 돌아옴 (?drive=ok)
   const connectDrive = async () => {
-    const url = cfgDraft.scriptUrl.trim();
-    if (!isValidScriptUrl(url)) { setDriveState({ status: 'bad', msg: '앱스크립트 웹 앱 주소(https://script.google.com/macros/s/.../exec)를 넣어 주세요.' }); return; }
-    setDriveState({ status: 'checking', msg: '확인 중...' });
+    setDriveState({ status: 'checking', msg: '구글 허락 화면으로 이동하는 중...', email: '' });
+    try { await startDriveConnect(); } catch (e) { setDriveState({ status: 'bad', msg: e?.message || '연결 실패', email: '' }); }
+  };
+
+  const checkDrive = async () => {
+    setDriveState((d) => ({ ...d, status: 'checking', msg: '확인 중...' }));
     try {
-      await pingScript(url);
-      // 선생님 키: 서버에 저장된 것이 있으면 그걸로, 없으면 새로 만들어 앱스크립트에 등록
-      const key = driveKeyInput.trim() || cfg?.driveKey || makeTeacherKey();
-      const r = await setupScript(url, key);
-      if (r.needKey) { setDriveState({ status: 'needKey', msg: r.error || '이미 정해진 선생님 키를 넣어 주세요.' }); return; }
-      await setSetting('script_url', url);
-      await setSetting('drive_key', key);
-      const st = await getSettings();
-      setCfg(st);
-      setDriveKeyInput('');
-      setDriveState({ status: 'ok', msg: r.created ? '연결됐습니다. 이제 학생 영상은 선생님 구글 드라이브의 "캐치볼 제출" 폴더에 저장됩니다.' : '연결 확인됐습니다.' });
-    } catch (e) {
-      setDriveState({ status: 'bad', msg: e?.message || '연결 실패' });
-    }
+      const r = await driveStatus();
+      setDriveState(r.connected ? { status: 'ok', msg: '연결 확인됐습니다.', email: r.email } : { status: 'none', msg: r.configured ? '아직 연결되지 않았어요.' : '엣지 함수 비밀값(GOOGLE_CLIENT_ID/SECRET)이 아직 없어요.', email: '' });
+    } catch (e) { setDriveState({ status: 'bad', msg: e?.message || '확인 실패', email: '' }); }
   };
 
   const disconnectDrive = async () => {
     if (!window.confirm('드라이브 연결을 끊을까요? 이후 제출되는 영상은 수파베이스 저장소(1GB)에 저장됩니다. 이미 드라이브에 있는 영상은 다시 연결하면 볼 수 있어요.')) return;
     try {
-      await setSetting('script_url', '');
-      setCfgDraft((d) => ({ ...d, scriptUrl: '' }));
+      await driveDisconnect();
       const st = await getSettings(); setCfg(st);
-      setDriveState({ status: 'none', msg: '' });
-    } catch (e) { setDriveState({ status: 'bad', msg: e?.message || '' }); }
+      setDriveState({ status: 'none', msg: '연결을 끊었습니다.', email: '' });
+    } catch (e) { setDriveState({ status: 'bad', msg: e?.message || '', email: '' }); }
   };
+
+  // 구글 허락 화면에서 돌아왔을 때
+  useEffect(() => {
+    const q = new URLSearchParams(window.location.search);
+    const r = q.get('drive');
+    if (!r) return;
+    const msg = r === 'ok' ? '구글 드라이브가 연결됐습니다. 이제 학생 영상은 선생님 드라이브 "캐치볼 제출" 폴더에 저장됩니다.' : r === 'denied' ? '구글 허락을 취소했어요. 다시 "구글 드라이브 연결"을 눌러 주세요.' : '구글 드라이브 연결에 실패했어요. 다시 시도해 주세요.';
+    q.delete('drive');
+    window.history.replaceState(null, '', window.location.pathname + (q.toString() ? '?' + q.toString().replace('teacher=1', 'teacher') : ''));
+    setShowCfg(true);
+    setDriveState({ status: r === 'ok' ? 'ok' : 'bad', msg, email: '' });
+    if (r === 'ok') driveStatus().then((st) => setDriveState((d) => ({ ...d, email: st.email || '' }))).catch(() => {});
+  }, []);
 
   const removeSubmission = async (item) => {
     if (!window.confirm(`${item.student1} · ${item.student2} 제출 영상을 지울까요? (저장 공간을 비웁니다. 채점 결과는 남습니다)`)) return;
@@ -754,7 +758,7 @@ export default function App() {
           </h2>
           {!cfg && <p className="cb-warn">⚠️ 설정을 읽지 못했습니다. 수파베이스 SQL Editor 에서 <code>supabase/catchball_v2.sql</code> 을 실행했는지 확인해 주세요.</p>}
           {cfg && !showCfg && (
-            <p className="cb-note">명렬표 {cfg.classes.length}개 반 · 촬영 최대 {cfg.maxSeconds}초 · 다시 제출 {cfg.allowResubmit ? '허용' : '막음'} · 영상 저장: {cfg.scriptUrl && cfg.driveKey ? <span className="cb-drive-status ok">구글 드라이브</span> : <span className="cb-drive-status">수파베이스 (1GB)</span>}</p>
+            <p className="cb-note">명렬표 {cfg.classes.length}개 반 · 촬영 최대 {cfg.maxSeconds}초 · 다시 제출 {cfg.allowResubmit ? '허용' : '막음'} · 영상 저장: {cfg.driveOn ? <span className="cb-drive-status ok">구글 드라이브{cfg.driveEmail ? ` (${cfg.driveEmail})` : ''}</span> : <span className="cb-drive-status">수파베이스 (1GB)</span>}</p>
           )}
           {cfg && showCfg && (
             <div className="cb-settings">
@@ -775,15 +779,12 @@ export default function App() {
               </div>
 
               <div className="cb-slider-group">
-                <div className="cb-slider-title">영상 저장 위치: 구글 드라이브 연결 {driveState.status === 'ok' && <span className="cb-drive-status ok">연결됨</span>}</div>
-                <p className="cb-note" style={{ margin: 0 }}>학생 영상을 선생님 구글 드라이브("캐치볼 제출" 폴더)에 저장합니다. 용량 걱정이 없습니다. 연결하려면 <code>apps-script/Code.gs</code> 를 선생님 구글 계정의 앱스크립트로 한 번 배포하고(안내: <code>apps-script/README.md</code>), 그 웹 앱 주소를 아래에 넣고 "연결"을 누르세요. 연결 안 하면 수파베이스 저장소(1GB, 약 150~200편)에 저장됩니다.</p>
-                <label>앱스크립트 웹 앱 주소<input placeholder="https://script.google.com/macros/s/.../exec" value={cfgDraft.scriptUrl} onChange={(e) => setCfgDraft({ ...cfgDraft, scriptUrl: e.target.value })} /></label>
-                {driveState.status === 'needKey' && (
-                  <label>선생님 키 <span className="cb-sub">앱스크립트 프로젝트 설정 › 스크립트 속성의 TEACHER_KEY 값</span><input value={driveKeyInput} onChange={(e) => setDriveKeyInput(e.target.value)} /></label>
-                )}
+                <div className="cb-slider-title">영상 저장 위치: 구글 드라이브 {driveState.status === 'ok' && <span className="cb-drive-status ok">연결됨{driveState.email ? ` · ${driveState.email}` : ''}</span>}</div>
+                <p className="cb-note" style={{ margin: 0 }}>"구글 드라이브 연결"을 누르고 선생님 구글 계정으로 허락하면, 학생이 올린 영상이 선생님 드라이브의 "캐치볼 제출 › 반 › 날짜" 폴더에 저장됩니다. 학생은 구글 로그인이 필요 없습니다. 이 앱이 만든 파일만 다룰 수 있고 드라이브의 다른 파일은 보지 않습니다. 연결 전에는 수파베이스 저장소(1GB)에 저장됩니다.</p>
                 <div className="cb-row" style={{ margin: 0, alignItems: 'center' }}>
-                  <button type="button" className="cb-btn" onClick={connectDrive} disabled={driveState.status === 'checking'}>{driveState.status === 'checking' ? '확인 중...' : driveState.status === 'ok' ? '다시 확인' : '연결'}</button>
-                  {cfg.scriptUrl && <button type="button" className="cb-btn ghost" onClick={disconnectDrive}>연결 끊기</button>}
+                  <button type="button" className="cb-btn" onClick={connectDrive} disabled={driveState.status === 'checking'}>{driveState.status === 'ok' ? '다른 계정으로 다시 연결' : '구글 드라이브 연결'}</button>
+                  <button type="button" className="cb-btn ghost" onClick={checkDrive} disabled={driveState.status === 'checking'}>연결 확인</button>
+                  {cfg.driveOn && <button type="button" className="cb-btn ghost" onClick={disconnectDrive}>연결 끊기</button>}
                   {driveState.msg && <span className={`cb-sub ${driveState.status === 'bad' ? 'cb-error' : ''}`} style={{ margin: 0 }}>{driveState.msg}</span>}
                 </div>
               </div>

@@ -13,9 +13,9 @@ function fmt(sec) { const m = Math.floor(sec / 60), s = Math.floor(sec % 60); re
 /**
  * 앱 안에서 촬영 → 촬영 끝나면 자동 제출. 횟수는 세지 않음.
  *  1. 카메라 켜기  2. 화면에서 두 학생이 선 자리를 눌러 표시  3. 촬영 (구도에서 벗어나면 경고, 최대 시간 지나면 자동 종료)  4. 자동 업로드
- * props: info({date, className, student1, student2}), validate() → 오류문구|null, maxSeconds, scriptUrl, onReset()
+ * props: info({date, className, student1, student2}), validate() → 오류문구|null, maxSeconds, useDrive, onReset()
  */
-export default function LiveCapture({ info, validate, maxSeconds = 60, scriptUrl = '', onReset }) {
+export default function LiveCapture({ info, validate, maxSeconds = 60, useDrive = false, onReset }) {
   const [phase, setPhase] = useState('idle'); // idle | opening | mark | ready | recording | uploading | done | error
   const [message, setMessage] = useState('');
   const [progress, setProgress] = useState(0);
@@ -208,7 +208,7 @@ export default function LiveCapture({ info, validate, maxSeconds = 60, scriptUrl
         fileName: `${info.student1}_${info.student2}.${ext}`,
         durationSec: duration,
         playerMarks: marksRef.current.length === 2 ? marksRef.current.map((m, i) => ({ x: m.x, footY: m.footY, name: i === 0 ? info.student1 : info.student2 })) : null,
-        scriptUrl,
+        useDrive,
         onStatus: setMessage,
         onProgress: setProgress,
       });

@@ -6,7 +6,7 @@
 
 주소는 하나입니다. 위쪽 버튼으로 화면을 바꿉니다 (`src/Root.jsx`).
 - 🎒 **학생 제출** (기본 화면, `?student` 로 열면 항상 이 화면): 선생님이 넣어 둔 명렬표에서 반·이름 고르기 → 촬영 안내 → 📹 앱 안에서 촬영(촬영 전 두 학생이 선 자리를 눌러 표시, 두 사람이 화면에서 벗어나면 경고, 최대 시간이 되면 자동 종료) → 끝나면 자동 업로드. 또는 📁 찍어 둔 영상 압축 업로드. 학생 화면에서는 횟수를 세지 않음(선생님이 채점).
-- 영상 저장 위치: 선생님 설정에서 **구글 드라이브**를 연결하면 영상 파일은 선생님 드라이브(`캐치볼 제출/반/날짜/`)에, 기록은 수파베이스에. 연결 안 하면 수파베이스 저장소(1GB). 설치 안내: `apps-script/README.md`.
+- 영상 저장 위치: 선생님 설정에서 **구글 드라이브 연결**(파라런과 같은 OAuth 방식)을 해 두면 영상 파일은 선생님 드라이브(`캐치볼 제출/반/날짜/`)에, 기록은 수파베이스에. 연결 전이나 드라이브가 안 될 때는 수파베이스 저장소(1GB). 설정 안내: `supabase/functions/catchball-drive/README.md`.
 - 👩‍🏫 **선생님**: 전용 선생님 계정으로 로그인(처음엔 "계정 만들기") → 영상을 올리면 **기준 찍기**(화면 속 공 한 번, 두 아이 발 한 번씩 누르기 — 건너뛰기 가능) → 학생이 제출한 영상 목록 → 채점 → 저장. 로그인 없이도 이 기기에서 영상을 올려 채점·기록 가능. 마지막에 보던 화면을 기억하므로 선생님 기기에서는 다음부터 바로 선생님 화면이 뜸. `?teacher` 를 주소 뒤에 붙여도 선생님 화면으로 열림.
 
 ## 처음 설정 (한 번만)
@@ -19,7 +19,7 @@
 4. **주소·키 넣기**: 대시보드 → Project Settings → API 에서 Project URL 과 publishable key 를 복사해 `.github/workflows/deploy.yml` 의 `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` 에 넣고 커밋.
 5. **GitHub Pages 켜기**: 저장소 Settings → Pages → Source 를 **GitHub Actions** 로. 이후 `main` 에 push 하면 자동 배포.
    - 주소: `https://<아이디>.github.io/<저장소이름>/` (학생·선생님 공통, 위쪽 버튼으로 전환)
-6. **제출 설정**: 선생님 화면 → ⚙️ 제출 설정 → 명렬표(반 이름 줄 다음에 이름들), 촬영 안내, 촬영 최대 시간, 다시 제출 허용 여부 → 설정 저장. 구글 드라이브에 영상을 두려면 `apps-script/README.md` 대로 앱스크립트를 배포하고 웹 앱 주소를 넣어 "연결".
+6. **제출 설정**: 선생님 화면 → ⚙️ 제출 설정 → 명렬표(반 이름 줄 다음에 이름들), 촬영 안내, 촬영 최대 시간, 다시 제출 허용 여부 → 설정 저장. 구글 드라이브에 영상을 두려면 `supabase/functions/catchball-drive/README.md` 대로 구글 OAuth 클라이언트를 만들고 함수를 배포한 뒤 "구글 드라이브 연결".
 7. **선생님 계정 만들기**: 배포된 주소 → 위쪽 "선생님" → "계정 만들기". 첫 계정은 가입 코드 없이 만들어지고, 두 번째부터는 가입 코드(`catchball.sql` 의 `signup_code`, 기본 `catch-2026`)가 필요합니다.
 
 ## 로컬 개발
@@ -61,7 +61,7 @@ src/
   live.js       촬영하면서 실시간 분석
   compress.js   브라우저에서 640px 로 압축
   api.js        수파베이스 저장소·RPC 통신, 설정(명렬표 등) 읽기·쓰기
-  drive.js      구글 드라이브(앱스크립트) 업로드·내려받기·삭제
+  drive.js      구글 드라이브 업로드·내려받기·삭제 (엣지 함수 catchball-drive 경유)
   supabase.js   수파베이스 클라이언트
   records.js    기기 저장(localStorage) + 엑셀 내려받기
   Root.jsx      화면 전환 (학생 제출 / 선생님)
@@ -69,6 +69,6 @@ src/
   upload/       학생 제출 화면 (Upload.jsx, LiveCapture.jsx)
 supabase/catchball.sql   DB·스토리지 설정 (SQL Editor 에서 실행)
 supabase/catchball_v2.sql  v2 추가분: 설정 RPC, 드라이브 칸, 학생 자리 표시, 제출 v2
-apps-script/Code.gs      구글 드라이브 저장용 앱스크립트 (README.md 대로 배포)
+supabase/functions/catchball-drive/  구글 드라이브 저장용 엣지 함수 (README.md 대로 배포)
 scripts/catchball-offline.mjs   ffmpeg 기반 오프라인 검사 도구
 ```

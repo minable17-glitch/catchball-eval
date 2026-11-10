@@ -11,7 +11,7 @@ const LAST_KEY = 'catchball_upload_last';
 // 학생 제출 화면: 반·이름을 명렬표에서 고르고, 앱 안에서 촬영(또는 찍어 둔 영상)해서 올리기만 함.
 // 횟수 세기는 여기서 하지 않음 (선생님이 영상을 보고 채점).
 export default function Upload() {
-  const [settings, setSettings] = useState(null); // {classes, guideText, maxSeconds, scriptUrl, allowResubmit}
+  const [settings, setSettings] = useState(null); // {classes, guideText, maxSeconds, driveOn, allowResubmit}
   const [settingsErr, setSettingsErr] = useState('');
   const [info, setInfo] = useState(() => {
     let className = '';
@@ -31,7 +31,7 @@ export default function Upload() {
     let cancelled = false;
     getPublicSettings()
       .then((s) => { if (!cancelled) setSettings(s); })
-      .catch((e) => { if (!cancelled) { setSettingsErr(e?.message || '설정을 불러오지 못했습니다.'); setSettings({ classes: [], guideText: '', maxSeconds: 60, scriptUrl: '', allowResubmit: true }); } });
+      .catch((e) => { if (!cancelled) { setSettingsErr(e?.message || '설정을 불러오지 못했습니다.'); setSettings({ classes: [], guideText: '', maxSeconds: 60, driveOn: false, allowResubmit: true }); } });
     return () => { cancelled = true; };
   }, []);
 
@@ -75,9 +75,9 @@ export default function Upload() {
           setMessage('압축이 안 되어 원본을 그대로 올립니다.');
         }
       }
-      if (!settings?.scriptUrl && blob.size > MAX_UPLOAD_BYTES) throw new Error(`영상이 너무 큽니다 (${Math.round(blob.size / MB)}MB). "올리기 전에 영상 줄이기"를 켜거나 더 짧게 찍어 주세요.`);
+      if (!settings?.driveOn && blob.size > MAX_UPLOAD_BYTES) throw new Error(`영상이 너무 큽니다 (${Math.round(blob.size / MB)}MB). "올리기 전에 영상 줄이기"를 켜거나 더 짧게 찍어 주세요.`);
       setStatus('uploading'); setProgress(0);
-      const r = await submitVideo({ info: cleanInfo(), blob, fileName, durationSec, scriptUrl: settings?.scriptUrl || '', onStatus: setMessage, onProgress: setProgress });
+      const r = await submitVideo({ info: cleanInfo(), blob, fileName, durationSec, useDrive: !!settings?.driveOn, onStatus: setMessage, onProgress: setProgress });
       setResult({ ...r, sizeMb: Math.round(blob.size / MB * 10) / 10, originalMb: Math.round(file.size / MB * 10) / 10 });
       setStatus('done');
       setMessage('');
@@ -157,7 +157,7 @@ export default function Upload() {
               )}
 
               {mode === 'live' && (
-                <LiveCapture key={`${info.className}|${info.student1}|${info.student2}`} info={cleanInfo()} validate={validateInfo} maxSeconds={settings.maxSeconds} scriptUrl={settings.scriptUrl} onReset={reset} />
+                <LiveCapture key={`${info.className}|${info.student1}|${info.student2}`} info={cleanInfo()} validate={validateInfo} maxSeconds={settings.maxSeconds} useDrive={settings.driveOn} onReset={reset} />
               )}
 
               {mode === 'file' && (<>

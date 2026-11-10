@@ -1,6 +1,8 @@
 -- ============================================================
 -- 캐치볼 평가 v2: 구글 드라이브 저장 + 제출 설정(명렬표·촬영 안내·촬영 시간) + 학생 위치 표시
 -- supabase/catchball.sql 을 이미 실행한 프로젝트에서 이 파일을 SQL Editor 에 붙여넣고 Run.
+-- 여러 번 실행해도 안전함.
+-- 드라이브 열쇠(drive_refresh_token 등)는 엣지 함수(supabase/functions/catchball-drive)만 service role 로 읽고 씀.
 -- ============================================================
 
 -- 제출 표: 드라이브 파일 정보와 학생이 촬영 전에 찍은 두 사람 위치
@@ -14,25 +16,27 @@ insert into catchball_settings (key, value) values
   ('guide_text', ''),
   ('max_seconds', '60'),
   ('allow_resubmit', '1'),
-  ('script_url', ''),
-  ('drive_key', '')
+  ('drive_on', '0')
 on conflict (key) do nothing;
+-- 이전 버전(앱스크립트 방식)에서 쓰던 값 정리
+delete from catchball_settings where key in ('script_url', 'drive_key');
 
 -- 학생 화면용 공개 설정 (가입 코드·선생님 키는 제외)
 create or replace function catchball_public_settings()
 returns table(key text, value text)
 language sql security definer set search_path = public as $$
   select key, value from catchball_settings
-  where key in ('roster', 'guide_text', 'max_seconds', 'allow_resubmit', 'script_url');
+  where key in ('roster', 'guide_text', 'max_seconds', 'allow_resubmit', 'drive_on');
 $$;
 grant execute on function catchball_public_settings() to anon, authenticated;
 
--- 선생님용 전체 설정
+-- 선생님용 설정 (드라이브 열쇠는 빼고)
 create or replace function catchball_get_settings()
 returns table(key text, value text)
 language sql security definer set search_path = public as $$
   select key, value from catchball_settings
-  where catchball_current_teacher() is not null;
+  where catchball_current_teacher() is not null
+    and key not in ('drive_refresh_token', 'drive_oauth_state');
 $$;
 grant execute on function catchball_get_settings() to anon, authenticated;
 
@@ -44,7 +48,7 @@ begin
   if catchball_current_teacher() is null then
     raise exception '선생님 로그인이 필요해요';
   end if;
-  if p_key not in ('roster', 'guide_text', 'max_seconds', 'allow_resubmit', 'script_url', 'drive_key', 'signup_code') then
+  if p_key not in ('roster', 'guide_text', 'max_seconds', 'allow_resubmit', 'signup_code') then
     raise exception '바꿀 수 없는 설정이에요: %', p_key;
   end if;
   insert into catchball_settings (key, value) values (p_key, left(coalesce(p_value, ''), 20000))
@@ -103,7 +107,7 @@ end;
 $$;
 grant execute on function catchball_submit_v2(date, text, text, text, text, text, text, text, bigint, text, int, jsonb) to anon, authenticated;
 
--- 제출 삭제: 드라이브 파일이면 파일 ID 를 돌려줌 (선생님 화면이 앱스크립트로 지움)
+-- 제출 삭제: 경로를 돌려줌 (드라이브 영상이면 선생님 화면이 드라이브 휴지통으로 보냄)
 create or replace function catchball_delete_submission(p_id uuid)
 returns text
 language plpgsql security definer set search_path = public as $$
