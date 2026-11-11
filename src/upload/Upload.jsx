@@ -162,8 +162,8 @@ export default function Upload() {
 
               {mode === 'file' && (<>
               <label className={`cb-drop ${busy ? 'is-busy' : ''}`} style={{ marginTop: 12 }}>
-                <input type="file" accept="video/*" capture="environment" onChange={(e) => setFile(e.target.files?.[0] || null)} disabled={busy} />
-                <span>{file ? `📼 ${file.name} (${Math.round(file.size / MB)}MB)` : '여기를 눌러 영상 고르기'}</span>
+                <input type="file" accept="video/*" onChange={(e) => setFile(e.target.files?.[0] || null)} disabled={busy} />
+                <span>{file ? `📼 ${file.name} (${Math.round(file.size / MB)}MB)` : '여기를 눌러 앨범에서 영상 고르기'}</span>
                 <small>캐치볼하는 두 사람이 옆모습으로 한 화면에 나오게 찍은 영상이어야 합니다.</small>
               </label>
 
