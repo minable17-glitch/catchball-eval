@@ -97,7 +97,7 @@ export default function Upload() {
     <div className="cb-app">
       <header className="cb-header">
         <h1>⚾ 캐치볼 영상 제출</h1>
-        <p>반과 이름을 고르고, 앱에서 바로 촬영하면 끝나는 즉시 선생님께 올라갑니다. 영상은 선생님만 볼 수 있습니다.</p>
+        <p>반과 이름을 고르고 앱에서 바로 촬영하세요. 찍은 영상을 확인한 뒤 올리면 선생님께 전달됩니다. 영상은 선생님만 볼 수 있습니다.</p>
       </header>
 
       {status === 'done' && result ? (
@@ -116,7 +116,7 @@ export default function Upload() {
               <div className="cb-tips cb-guide">
                 <b>📋 촬영 안내</b>
                 <p>{guide}</p>
-                <small>촬영 시간은 최대 {settings.maxSeconds}초입니다. 시간이 되면 자동으로 끝나고 올라갑니다.</small>
+                <small>촬영 시간은 최대 {settings.maxSeconds}초입니다. 시간이 되면 촬영이 자동으로 끝나고, 영상을 확인한 뒤 올릴지 다시 찍을지 고릅니다.</small>
               </div>
               <div className="cb-grid" style={{ marginTop: 12 }}>
                 {useRoster ? (

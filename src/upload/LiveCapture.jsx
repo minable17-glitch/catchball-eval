@@ -25,6 +25,7 @@ export default function LiveCapture({ info, validate, maxSeconds = 60, useDrive 
   const [orientNote, setOrientNote] = useState('');
   const [framingOn, setFramingOn] = useState(false);
   const [result, setResult] = useState(null);
+  const [review, setReview] = useState(null); // 촬영 직후 확인용 {blob, url, duration, sizeMb, auto}
   const videoRef = useRef(null);
   const overlayRef = useRef(null);
   const streamRef = useRef(null);
@@ -35,9 +36,13 @@ export default function LiveCapture({ info, validate, maxSeconds = 60, useDrive 
   const startAtRef = useRef(0);
   const stoppingRef = useRef(false);
   const stopRef = useRef(null); // 시간 초과 시 호출할 촬영 종료 함수
+  const reviewRef = useRef(null);
   useEffect(() => { marksRef.current = marks; }, [marks]);
 
   useEffect(() => () => { stopStream(streamRef.current); }, []);
+  useEffect(() => () => { if (review?.url) URL.revokeObjectURL(review.url); }, [review]);
+  // 확인 화면이 뜨면 그 자리로 화면을 옮김 (전체 화면 카메라가 닫히면 페이지 맨 위가 보이므로)
+  useEffect(() => { if (phase === 'review' || phase === 'uploading' || phase === 'done') reviewRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' }); }, [phase, review]);
 
   // ── 표시 그리기 (두 학생 자리) ──
   useEffect(() => {
@@ -190,18 +195,35 @@ export default function LiveCapture({ info, validate, maxSeconds = 60, useDrive 
     if (!recorder || stoppingRef.current) return;
     stoppingRef.current = true;
     const duration = Math.round((performance.now() - startAtRef.current) / 1000);
-    setPhase('uploading');
-    setProgress(0); setWarn('');
-    setMessage(auto ? `${maxSeconds}초가 지나 촬영을 마쳤어요. 올리는 중...` : '');
+    // 바로 올리지 않고, 찍은 영상을 보여 준 뒤 올릴지 다시 찍을지 고르게 함 (카메라는 다시 찍기용으로 켜 둠)
+    setPhase('review');
+    setReview(null); setWarn(''); setMessage('');
     let blob;
     try {
       blob = await recorder.stop();
     } catch (e) {
       setPhase('error'); setMessage('녹화 파일을 만들지 못했습니다: ' + (e?.message || '')); return;
     }
+    recorderRef.current = null;
+    setReview({ blob, url: URL.createObjectURL(blob), duration, sizeMb: Math.round(blob.size / MB * 10) / 10, auto });
+  };
+
+  const uploadReviewed = async () => {
+    if (!review) return;
     stopStream(streamRef.current);
     streamRef.current = null;
-    await doUpload(blob, duration);
+    setPhase('uploading'); setProgress(0); setMessage('');
+    await doUpload(review.blob, review.duration);
+  };
+
+  const retake = async () => {
+    setReview(null);
+    if (streamRef.current?.active && videoRef.current) {
+      try { await videoRef.current.play(); } catch { /* 무시 */ }
+      setPhase('ready'); // 표시한 두 자리는 그대로 씀
+    } else {
+      await open();
+    }
   };
 
   const doUpload = async (blob, duration) => {
@@ -244,7 +266,7 @@ export default function LiveCapture({ info, validate, maxSeconds = 60, useDrive 
   const remain = Math.max(0, maxSeconds - elapsed);
 
   return (
-    <div className="cb-live">
+    <div className="cb-live" ref={reviewRef}>
       <div className={`cb-cam ${showVideo ? 'is-full' : 'is-hidden'}`}>
         <div className="cb-cam-view">
           <video ref={videoRef} playsInline muted autoPlay />
@@ -269,19 +291,32 @@ export default function LiveCapture({ info, validate, maxSeconds = 60, useDrive 
             <button type="button" className="cb-btn ghost" onClick={redoMarks}>자리 다시</button>
           </>)}
           {phase === 'recording' && (
-            <button type="button" className="cb-cam-shutter is-rec" onClick={() => stopRecording(false)} aria-label="촬영 끝 (자동으로 올라갑니다)"><span /></button>
+            <button type="button" className="cb-cam-shutter is-rec" onClick={() => stopRecording(false)} aria-label="촬영 끝"><span /></button>
           )}
         </div>
       </div>
 
       {phase === 'idle' && (
         <>
-          <p className="cb-note">반과 이름을 고른 뒤 카메라를 켜세요. 카메라가 화면 전체로 열립니다. 촬영 중에는 횟수를 세지 않고, 선생님이 영상을 보고 채점합니다.</p>
+          <p className="cb-note">반과 이름을 고른 뒤 카메라를 켜세요. 카메라가 화면 전체로 열립니다. 찍고 나면 영상을 확인하고 올릴지 다시 찍을지 고를 수 있습니다.</p>
           <button type="button" className="cb-btn big" onClick={open}>📷 카메라 켜기</button>
           {message && <p className="cb-error">{message}</p>}
         </>
       )}
       {phase === 'opening' && <p className="cb-note">카메라를 준비하는 중... (처음 한 번은 몇 초 걸립니다)</p>}
+      {phase === 'review' && (
+        <div className="cb-review">
+          {review ? (<>
+            {review.auto && <p className="cb-note">⏱ {maxSeconds}초가 지나 촬영을 마쳤어요.</p>}
+            <p className="cb-note"><b>찍은 영상을 확인하세요.</b> 두 사람과 공이 잘 보이면 올리고, 잘못 찍혔으면 다시 찍으세요. ({fmt(review.duration)} · {review.sizeMb}MB)</p>
+            <div className="cb-row" style={{ margin: 0 }}>
+              <button type="button" className="cb-btn big" style={{ flex: 1 }} onClick={uploadReviewed}>✅ 이 영상 올리기</button>
+              <button type="button" className="cb-btn ghost" onClick={retake}>🔄 다시 찍기</button>
+            </div>
+            <video className="cb-review-video" src={review.url} controls playsInline />
+          </>) : <p className="cb-note">영상 정리 중...</p>}
+        </div>
+      )}
       {phase === 'uploading' && (
         <div className="cb-upload-progress">
           {result && <p className="cb-note">촬영 {fmt(result.duration)} · {result.sizeMb}MB</p>}
