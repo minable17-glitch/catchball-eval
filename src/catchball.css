@@ -183,3 +183,10 @@ input[type="range"] { width: 100%; accent-color: var(--cb-accent-dark); }
 /* 촬영 직후 확인 */
 .cb-review { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
 .cb-review-video { width: 100%; max-height: 55vh; background: #000; border-radius: 12px; }
+
+/* 평가 회차 */
+.cb-round-badge { display: inline-block; margin-bottom: 10px; padding: 6px 14px; border-radius: 999px; background: var(--cb-accent); color: #2b2000; font-size: 0.95rem; }
+.cb-round-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 10px; }
+.cb-round-tabs button { font: inherit; font-size: 0.85rem; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--cb-line); background: #fff; color: var(--cb-muted); cursor: pointer; }
+.cb-round-tabs button.on { background: var(--cb-accent); border-color: var(--cb-accent); color: #2b2000; font-weight: 700; }
+.cb-pill.round { background: #e8efff; color: #2a4fb0; }

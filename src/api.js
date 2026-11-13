@@ -80,6 +80,12 @@ export function parseRoster(text) {
   return classes.filter((c) => c.students.length);
 }
 
+export const DEFAULT_ROUND = '수행평가 1';
+function parseRounds(text) {
+  const list = String(text ?? '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  return list.length ? [...new Set(list)] : [DEFAULT_ROUND];
+}
+
 function normalizeSettings(m) {
   return {
     roster: m.roster || '',
@@ -88,6 +94,8 @@ function normalizeSettings(m) {
     maxSeconds: Math.max(10, Math.min(600, Number(m.max_seconds) || 60)),
     allowResubmit: (m.allow_resubmit ?? '1') !== '0',
     driveOn: m.drive_on === '1',
+    rounds: parseRounds(m.rounds),
+    openRound: (m.open_round || '').trim() || parseRounds(m.rounds)[0] || DEFAULT_ROUND,
     driveEmail: m.drive_email || '',
     signupCode: m.signup_code || '',
   };
@@ -121,8 +129,8 @@ export async function submitVideo({ info, blob, fileName, durationSec = null, pl
   let path, driveFileId = null, driveLink = null, finalName = safeName(fileName), size = blob.size;
   // 다시 제출이 막혀 있으면 영상을 올리기 전에 알려 줌 (v2 SQL 전 서버면 건너뜀)
   try {
-    const ok = await rpc('catchball_can_submit', { p_eval_date: info.date || null, p_class_name: info.className, p_student1: info.student1, p_student2: info.student2 });
-    if (ok === false) throw new Error('이 팀은 오늘 이미 제출했어요. 다시 내려면 선생님께 말씀해 주세요');
+    const ok = await rpc('catchball_can_submit', { p_eval_date: info.date || null, p_class_name: info.className, p_student1: info.student1, p_student2: info.student2, p_eval_round: info.round || DEFAULT_ROUND });
+    if (ok === false) throw new Error(`이 팀은 ${info.round || DEFAULT_ROUND}에 이미 제출했어요. 다시 내려면 선생님께 말씀해 주세요`);
   } catch (e) {
     if (/이미 제출/.test(e?.message || '')) throw e;
     console.warn('제출 가능 여부 확인 건너뜀', e);
@@ -148,7 +156,7 @@ export async function submitVideo({ info, blob, fileName, durationSec = null, pl
     ({ path } = await uploadVideo({ blob, fileName, onProgress }));
   }
   onStatus?.('제출 기록 남기는 중...');
-  const rows = await rpc('catchball_submit_v2', {
+  const args = {
     p_eval_date: info.date || null,
     p_class_name: info.className,
     p_student1: info.student1,
@@ -161,7 +169,17 @@ export async function submitVideo({ info, blob, fileName, durationSec = null, pl
     p_mime_type: blob.type || 'video/webm',
     p_duration_sec: durationSec,
     p_player_marks: playerMarks,
-  });
+    p_eval_round: info.round || DEFAULT_ROUND,
+  };
+  let rows;
+  try {
+    rows = await rpc('catchball_submit_v2', args);
+  } catch (e) {
+    // 회차 SQL(catchball_v3_rounds.sql)을 아직 안 돌린 서버: 회차 없이 기록 (영상은 이미 올라갔으므로 기록을 꼭 남김)
+    if (!/catchball_submit_v2|function|schema cache/i.test(e?.message || '')) throw e;
+    const { p_eval_round: _r, ...old } = args;
+    rows = await rpc('catchball_submit_v2', old);
+  }
   const row = Array.isArray(rows) ? rows[0] : rows;
   return { id: row?.id, path, fileName: finalName, driveLink, storage, note };
 }
@@ -222,6 +240,7 @@ export async function listSubmissions() {
     autoSuccess: r.auto_success, autoFail: r.auto_fail,
     driveFileId: r.drive_file_id || null, driveLink: r.drive_link || null,
     playerMarks: Array.isArray(r.player_marks) ? r.player_marks : null,
+    round: r.eval_round || DEFAULT_ROUND,
   }));
 }
 
@@ -232,6 +251,7 @@ export async function listResults() {
     className: r.class_name, student1: r.student1, student2: r.student2,
     success: r.success, fail: r.fail, bestStreak: r.best_streak,
     duration: r.duration_sec, memo: r.memo, submissionId: r.submission_id,
+    round: r.eval_round || '',
   }));
 }
 

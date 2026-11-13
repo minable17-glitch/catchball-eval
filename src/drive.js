@@ -91,7 +91,7 @@ async function putRelay(uploadUrl, blob, onProgress) {
 
 /** 학생 영상을 선생님 드라이브에 올림 → { fileId, fileName, link, size, route } */
 export async function uploadToDrive({ info, blob, fileName, onStatus, onProgress }) {
-  const meta = { className: info.className, student1: info.student1, student2: info.student2, date: info.date, fileName, mimeType: blob.type || 'video/webm', size: blob.size };
+  const meta = { round: info.round || '', className: info.className, student1: info.student1, student2: info.student2, date: info.date, fileName, mimeType: blob.type || 'video/webm', size: blob.size };
   onStatus?.('드라이브에 올릴 준비 중...');
   let start = await callDrive('start_upload', { ...meta, origin: window.location.origin });
   let file, route = 'direct';

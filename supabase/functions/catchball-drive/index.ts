@@ -136,8 +136,11 @@ async function startUpload(body: Record<string, unknown>) {
   if (!s1 || !s2) throw new HttpError(400, '학생 이름 두 개가 필요해요.');
   const className = clean(body.className, 30) || '반 미입력';
   const date = /^\d{4}-\d{2}-\d{2}$/.test(String(body.date ?? '')) ? String(body.date) : new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10);
+  const round = clean(body.round, 30);
   const root = await rootFolder();
-  const folder = await findOrCreateFolder(date, await findOrCreateFolder(className, root));
+  // 회차가 있으면 회차 폴더 아래로: 캐치볼 제출 › 수행평가 2 › 반 › 날짜 (회차끼리 섞이지 않게)
+  const base = round ? await findOrCreateFolder(round, root) : root;
+  const folder = await findOrCreateFolder(date, await findOrCreateFolder(className, base));
   const ext = (/\.([a-z0-9]{2,5})$/i.exec(String(body.fileName ?? ''))?.[1] || 'webm').toLowerCase();
   const stamp = new Date(Date.now() + 9 * 3600_000).toISOString().slice(11, 19).replace(/:/g, '');
   const name = `${s1}_${s2}_${stamp}.${ext}`;
@@ -152,7 +155,7 @@ async function startUpload(body: Record<string, unknown>) {
   if (typeof body.origin === 'string' && /^https?:\/\/[\w.:-]+$/.test(body.origin)) headers['Origin'] = body.origin; // 학생 브라우저가 바로 올릴 수 있게
   const r = await fetch(`${API_BASE}/upload/drive/v3/files?uploadType=resumable&fields=id,name,size,mimeType,webViewLink`, {
     method: 'POST', headers,
-    body: JSON.stringify({ name, parents: [folder], mimeType: mime, description: `${className} ${s1}·${s2} ${date}` }),
+    body: JSON.stringify({ name, parents: [folder], mimeType: mime, description: `${round ? round + ' ' : ''}${className} ${s1}·${s2} ${date}` }),
   });
   if (!r.ok) throw new HttpError(502, '드라이브 업로드 준비 실패: ' + (await r.text()).slice(0, 200));
   const uploadUrl = r.headers.get('location');

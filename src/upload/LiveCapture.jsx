@@ -327,7 +327,7 @@ export default function LiveCapture({ info, validate, maxSeconds = 60, useDrive 
       {phase === 'done' && result && (
         <div className="cb-done">
           <h2>✅ 제출 완료!</h2>
-          <p className="cb-big">{info.className} · {info.student1} · {info.student2}</p>
+          <p className="cb-big">{info.round ? `${info.round} · ` : ''}{info.className} · {info.student1} · {info.student2}</p>
           <p className="cb-note">촬영 {fmt(result.duration)} · {result.sizeMb}MB · {result.storage === 'drive' ? '선생님 구글 드라이브에 저장됨' : '서버에 저장됨'}. 선생님이 영상을 보고 채점합니다.</p>
           <button type="button" className="cb-btn big" onClick={() => onReset?.()}>다른 팀 영상 올리기</button>
         </div>

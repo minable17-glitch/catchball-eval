@@ -3,7 +3,7 @@ import { DEFAULT_BALL_PARAMS, DEFAULT_EVENT_PARAMS, detectEvents, makeColorMask,
 import { analyzeVideo, previewMask } from './analyzer.js';
 import { loadPoseLandmarker } from './pose.js';
 import { addRecord, deleteRecord, exportRecordsToExcel, loadRecords, todayKST } from './records.js';
-import { DEFAULT_GUIDE, deleteSubmission, fetchVideo, getSavedTeacherUsername, getSettings, listLabelCounts, listResults, listSubmissions, parseRoster, saveResult, setSetting, teacherLogin, teacherLogout, teacherMe, teacherSignup } from './api.js';
+import { DEFAULT_GUIDE, DEFAULT_ROUND, deleteSubmission, fetchVideo, getSavedTeacherUsername, getSettings, listLabelCounts, listResults, listSubmissions, parseRoster, saveResult, setSetting, teacherLogin, teacherLogout, teacherMe, teacherSignup } from './api.js';
 import { disconnectDrive as driveDisconnect, driveStatus, startDriveConnect } from './drive.js';
 import Label from './Label.jsx';
 
@@ -87,7 +87,8 @@ export default function App() {
   const [currentSubmissionId, setCurrentSubmissionId] = useState(null);
   // ── 제출 설정 (명렬표, 촬영 안내, 촬영 시간, 드라이브 연결) ──
   const [cfg, setCfg] = useState(null); // 서버에서 읽은 설정
-  const [cfgDraft, setCfgDraft] = useState({ roster: '', guideText: '', maxSeconds: 60, allowResubmit: true });
+  const [cfgDraft, setCfgDraft] = useState({ roster: '', guideText: '', maxSeconds: 60, allowResubmit: true, roundsText: '', openRound: '' });
+  const [roundFilter, setRoundFilter] = useState('전체'); // 제출 목록·결과 표를 회차별로 보기
   const [cfgMsg, setCfgMsg] = useState('');
   const [cfgBusy, setCfgBusy] = useState(false);
   const [showCfg, setShowCfg] = useState(false);
@@ -122,7 +123,7 @@ export default function App() {
     setLabelCounts(counts || {});
     if (st) {
       setCfg(st);
-      setCfgDraft({ roster: st.roster, guideText: st.guideText, maxSeconds: st.maxSeconds, allowResubmit: st.allowResubmit });
+      setCfgDraft({ roster: st.roster, guideText: st.guideText, maxSeconds: st.maxSeconds, allowResubmit: st.allowResubmit, roundsText: st.rounds.join('\n'), openRound: st.openRound });
       setDriveState((d) => (d.status === 'checking' || d.msg ? d : st.driveOn ? { status: 'ok', msg: '', email: st.driveEmail } : { status: 'none', msg: '', email: '' }));
     }
   }, []);
@@ -187,6 +188,11 @@ export default function App() {
       await setSetting('guide_text', cfgDraft.guideText);
       await setSetting('max_seconds', String(Math.max(10, Math.min(600, Number(cfgDraft.maxSeconds) || 60))));
       await setSetting('allow_resubmit', cfgDraft.allowResubmit ? '1' : '0');
+      const rounds = [...new Set(cfgDraft.roundsText.split(/\r?\n/).map((x) => x.trim()).filter(Boolean))];
+      if (rounds.length) {
+        await setSetting('rounds', rounds.join('\n'));
+        await setSetting('open_round', rounds.includes(cfgDraft.openRound) ? cfgDraft.openRound : rounds[rounds.length - 1]);
+      }
       const st = await getSettings();
       setCfg(st);
       setCfgMsg(`저장했습니다. 명렬표 ${st.classes.length}개 반, ${st.classes.reduce((n, c) => n + c.students.length, 0)}명.`);
@@ -573,6 +579,15 @@ export default function App() {
   };
 
   const busy = status === 'loading' || status === 'pose' || status === 'analyzing';
+  const roundList = [...new Set([...(cfg?.rounds || []), ...submissions.map((x) => x.round), ...sheetResults.map((x) => x.round).filter(Boolean)])];
+  const inRound = (x) => roundFilter === '전체' || (x.round || DEFAULT_ROUND) === roundFilter;
+  const shownSubs = submissions.filter(inRound);
+  const shownResults = sheetResults.filter(inRound);
+  const roundTabs = roundList.length > 1 && (
+    <div className="cb-round-tabs">
+      {['전체', ...roundList].map((r) => <button key={r} type="button" className={roundFilter === r ? 'on' : ''} onClick={() => setRoundFilter(r)}>{r}{r !== '전체' ? ` (${submissions.filter((x) => x.round === r).length})` : ''}</button>)}
+    </div>
+  );
   const pct = progress.total ? Math.round((progress.index / progress.total) * 100) : 0;
 
   return (
@@ -727,15 +742,17 @@ export default function App() {
           <h2>📥 학생이 제출한 영상 <span className="cb-sub">{submissions.length}건 · "공 표시"로 학습 자료를 모읍니다</span>
             <button type="button" className="cb-link" style={{ padding: 0, marginLeft: 'auto' }} onClick={() => refreshFromServer().catch((e) => setToast(e?.message || '새로고침 실패'))}>새로고침</button>
           </h2>
+          {roundTabs}
           {submissions.length === 0 ? (
             <p className="cb-note">아직 제출된 영상이 없습니다. 학생 제출 페이지 주소를 학생들에게 보내 주세요: <code>{new URL('./', window.location.href).toString()}</code> (학생은 같은 주소에서 "학생 제출" 화면을 씁니다)</p>
           ) : (
             <ul className="cb-sub-list">
-              {submissions.map((it) => (
+              {shownSubs.length === 0 && <p className="cb-note">이 회차에는 제출된 영상이 없습니다.</p>}
+              {shownSubs.map((it) => (
                 <li key={it.id} className={it.status === '채점완료' ? 'graded' : ''}>
                   <div>
                     <div><b>{it.student1} · {it.student2}</b> <span className="cb-sub">{it.className}</span>
-                      <span className={`cb-pill ${it.status === '채점완료' ? 'done' : ''}`}>{it.status || '미채점'}</span></div>
+                      <span className="cb-pill round">{it.round}</span><span className={`cb-pill ${it.status === '채점완료' ? 'done' : ''}`}>{it.status || '미채점'}</span></div>
                     <div className="meta">{it.date} · {it.sizeMb}MB{it.durationSec ? ` · ${fmtTime(it.durationSec)}` : ''}{it.playerMarks?.length === 2 ? ' · 학생 자리 표시됨' : ''}{it.autoSuccess != null ? ` · 촬영 중 자동 카운트: 성공 ${it.autoSuccess} · 실패 ${it.autoFail}` : ''}{it.driveLink ? <> · <a href={it.driveLink} target="_blank" rel="noreferrer">드라이브에서 보기</a></> : ''}</div>
                   </div>
                   <div className="cb-row" style={{ margin: 0 }}>
@@ -758,10 +775,21 @@ export default function App() {
           </h2>
           {!cfg && <p className="cb-warn">⚠️ 설정을 읽지 못했습니다. 수파베이스 SQL Editor 에서 <code>supabase/catchball_v2.sql</code> 을 실행했는지 확인해 주세요.</p>}
           {cfg && !showCfg && (
-            <p className="cb-note">명렬표 {cfg.classes.length}개 반 · 촬영 최대 {cfg.maxSeconds}초 · 다시 제출 {cfg.allowResubmit ? '허용' : '막음'} · 영상 저장: {cfg.driveOn ? <span className="cb-drive-status ok">구글 드라이브{cfg.driveEmail ? ` (${cfg.driveEmail})` : ''}</span> : <span className="cb-drive-status">수파베이스 (1GB)</span>}</p>
+            <p className="cb-note">지금 제출: <b>{cfg.openRound}</b> · 명렬표 {cfg.classes.length}개 반 · 촬영 최대 {cfg.maxSeconds}초 · 다시 제출 {cfg.allowResubmit ? '허용' : '막음'} · 영상 저장: {cfg.driveOn ? <span className="cb-drive-status ok">구글 드라이브{cfg.driveEmail ? ` (${cfg.driveEmail})` : ''}</span> : <span className="cb-drive-status">수파베이스 (1GB)</span>}</p>
           )}
           {cfg && showCfg && (
             <div className="cb-settings">
+              <div className="cb-grid">
+                <label>평가 회차 <span className="cb-sub">한 줄에 하나. 회차마다 드라이브 폴더가 따로 생깁니다</span>
+                  <textarea style={{ minHeight: 70 }} value={cfgDraft.roundsText} onChange={(e) => setCfgDraft({ ...cfgDraft, roundsText: e.target.value })} placeholder={'수행평가 1\n수행평가 2'} />
+                </label>
+                <label>지금 학생이 제출하는 회차
+                  <select value={cfgDraft.openRound} onChange={(e) => setCfgDraft({ ...cfgDraft, openRound: e.target.value })}>
+                    {[...new Set(cfgDraft.roundsText.split(/\r?\n/).map((x) => x.trim()).filter(Boolean))].map((r) => <option key={r} value={r}>{r}</option>)}
+                  </select>
+                  <span className="cb-sub">학생 화면 맨 위에 "지금 제출: {cfgDraft.openRound}"로 보이고, 영상은 캐치볼 제출 › {cfgDraft.openRound} › 반 › 날짜 폴더로 갑니다.</span>
+                </label>
+              </div>
               <label>명렬표 <span className="cb-sub">반 이름 줄("1학년 3반") 다음 줄에 이름들을 쉼표나 띄어쓰기로. 학생은 여기서 골라 제출합니다. 비워 두면 이름을 직접 적습니다.</span>
                 <textarea value={cfgDraft.roster} onChange={(e) => setCfgDraft({ ...cfgDraft, roster: e.target.value })} placeholder={'1학년 3반\n김민수, 이영희, 박지훈\n1학년 4반\n...'} />
               </label>
@@ -835,15 +863,16 @@ export default function App() {
       {/* 4. 기록 */}
       <section className="cb-card">
         <h2>4. 저장된 기록 <span className="cb-sub">{apiReady ? '서버에 저장된 채점 결과' : '이 기기에 저장됩니다'}</span></h2>
+        {apiReady && roundTabs}
         {apiReady && (
-          sheetResults.length === 0 ? <p className="cb-note">서버에 아직 채점 결과가 없습니다.</p> : (
+          shownResults.length === 0 ? <p className="cb-note">서버에 아직 채점 결과가 없습니다.</p> : (
             <div className="cb-table-wrap">
               <table className="cb-table">
-                <thead><tr><th>평가일</th><th>반</th><th>학생</th><th>성공</th><th>실패</th><th>연속</th></tr></thead>
+                <thead><tr><th>회차</th><th>평가일</th><th>반</th><th>학생</th><th>성공</th><th>실패</th><th>연속</th></tr></thead>
                 <tbody>
-                  {sheetResults.map((r) => (
+                  {shownResults.map((r) => (
                     <tr key={r.id}>
-                      <td>{r.date}</td><td>{r.className}</td><td>{r.student1} · {r.student2}</td>
+                      <td>{r.round || '-'}</td><td>{r.date}</td><td>{r.className}</td><td>{r.student1} · {r.student2}</td>
                       <td className="ok">{r.success}</td><td className="bad">{r.fail}</td><td>{r.bestStreak}</td>
                     </tr>
                   ))}

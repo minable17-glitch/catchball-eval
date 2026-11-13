@@ -15,7 +15,7 @@
 
 1. **수파베이스 프로젝트 만들기**: https://supabase.com/dashboard → New project → 이름 `catchball-eval`, 지역 Northeast Asia (Seoul). 무료 플랜은 조직당 활성 프로젝트 2개까지이므로, 자리가 없으면 안 쓰는 프로젝트를 Pause 하거나 새 Organization 을 만드세요.
 2. **익명 로그인 켜기**: 대시보드 → Authentication → Sign In / Providers → **Anonymous Sign-Ins** 켜기.
-3. **SQL 실행**: 대시보드 → SQL Editor → `supabase/catchball.sql` 내용을 붙여 넣고 Run. (버킷 `catchball-videos` 와 `catchball_` 표·함수가 만들어짐) 이어서 `supabase/catchball_v2.sql` 도 Run (제출 설정·드라이브 저장·학생 자리 표시).
+3. **SQL 실행**: 대시보드 → SQL Editor → `supabase/catchball.sql` 내용을 붙여 넣고 Run. (버킷 `catchball-videos` 와 `catchball_` 표·함수가 만들어짐) 이어서 `supabase/catchball_v2.sql` 도 Run (제출 설정·드라이브 저장·학생 자리 표시). 그다음 `supabase/catchball_v3_rounds.sql` 도 Run (평가 회차: 수행평가 1·2 …).
 4. **주소·키 넣기**: 대시보드 → Project Settings → API 에서 Project URL 과 publishable key 를 복사해 `.github/workflows/deploy.yml` 의 `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` 에 넣고 커밋.
 5. **GitHub Pages 켜기**: 저장소 Settings → Pages → Source 를 **GitHub Actions** 로. 이후 `main` 에 push 하면 자동 배포.
    - 주소: `https://<아이디>.github.io/<저장소이름>/` (학생·선생님 공통, 위쪽 버튼으로 전환)
