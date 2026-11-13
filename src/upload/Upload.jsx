@@ -65,7 +65,7 @@ export default function Upload() {
     const controller = new AbortController();
     abortRef.current = controller;
 
-    let blob = file, fileName = file.name, durationSec = null;
+    let blob = file, fileName = file.name, durationSec = null, compressNote = '';
     try {
       if (compress) {
         setStatus('compressing'); setProgress(0);
@@ -77,12 +77,12 @@ export default function Upload() {
         } catch (e) {
           if (e?.name === 'AbortError') throw e;
           console.warn('압축 실패, 원본을 그대로 올립니다', e);
-          setMessage('압축이 안 되어 원본을 그대로 올립니다.');
+          compressNote = `영상 줄이기가 안 되어 원본(${Math.round(file.size / MB)}MB)을 그대로 올립니다. 시간이 걸릴 수 있어요.`;
         }
       }
       if (!settings?.driveOn && blob.size > MAX_UPLOAD_BYTES) throw new Error(`영상이 너무 큽니다 (${Math.round(blob.size / MB)}MB). "올리기 전에 영상 줄이기"를 켜거나 더 짧게 찍어 주세요.`);
       setStatus('uploading'); setProgress(0);
-      const r = await submitVideo({ info: cleanInfo(), blob, fileName, durationSec, useDrive: !!settings?.driveOn, onStatus: setMessage, onProgress: setProgress });
+      const r = await submitVideo({ info: cleanInfo(), blob, fileName, durationSec, useDrive: !!settings?.driveOn, onStatus: (m) => setMessage(compressNote ? `${compressNote} ${m}` : m), onProgress: setProgress });
       setResult({ ...r, sizeMb: Math.round(blob.size / MB * 10) / 10, originalMb: Math.round(file.size / MB * 10) / 10 });
       setStatus('done');
       setMessage('');
@@ -178,6 +178,7 @@ export default function Upload() {
                 <input type="file" accept="video/*" onChange={(e) => setFile(e.target.files?.[0] || null)} disabled={busy} />
                 <span>{file ? `📼 ${file.name} (${Math.round(file.size / MB)}MB)` : '여기를 눌러 앨범에서 영상 고르기'}</span>
                 <small>캐치볼하는 두 사람이 옆모습으로 한 화면에 나오게 찍은 영상이어야 합니다.</small>
+                {file && file.size > 100 * MB && <small style={{ color: '#a4262c', fontWeight: 700 }}>영상이 커요({Math.round(file.size / MB)}MB). 줄이는 데 영상 길이만큼, 올리는 데 시간이 더 걸립니다. 와이파이에서 올리거나 "바로 촬영해서 제출"을 쓰면 빠릅니다.</small>}
               </label>
 
               {canCompress() && (

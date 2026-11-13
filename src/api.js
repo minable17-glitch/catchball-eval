@@ -145,7 +145,11 @@ export async function submitVideo({ info, blob, fileName, durationSec = null, pl
     } catch (e) {
       // 두 번째 길: 드라이브가 안 되면 수파베이스 저장소에 (영상을 잃지 않게)
       console.warn('드라이브 저장 실패, 수파베이스 저장소로 올립니다', e);
-      if (blob.size > MAX_UPLOAD_BYTES) throw e;
+      if (blob.size > MAX_UPLOAD_BYTES) {
+        const mb = Math.round(blob.size / 1048576);
+        const why = /fetch|network|연결/i.test(e?.message || '') ? '인터넷 연결이 끊겨' : (e?.message || '알 수 없는 문제로');
+        throw new Error(`드라이브에 올리지 못했어요 (${why}). 영상이 ${mb}MB로 커서 오래 걸립니다. 와이파이에서 다시 올리거나, "바로 촬영해서 제출"로 찍으면 10MB 안팎이라 금방 올라갑니다.`);
+      }
       note = '드라이브에 못 올려 서버에 대신 저장했어요. (' + (e?.message || '') + ')';
       onStatus?.('드라이브 대신 서버에 올리는 중...');
       onProgress?.(0);
