@@ -191,7 +191,6 @@ export default function App() {
       const rounds = [...new Set(cfgDraft.roundsText.split(/\r?\n/).map((x) => x.trim()).filter(Boolean))];
       if (rounds.length) {
         await setSetting('rounds', rounds.join('\n'));
-        await setSetting('open_round', rounds.includes(cfgDraft.openRound) ? cfgDraft.openRound : rounds[rounds.length - 1]);
       }
       const st = await getSettings();
       setCfg(st);
@@ -775,19 +774,13 @@ export default function App() {
           </h2>
           {!cfg && <p className="cb-warn">⚠️ 설정을 읽지 못했습니다. 수파베이스 SQL Editor 에서 <code>supabase/catchball_v2.sql</code> 을 실행했는지 확인해 주세요.</p>}
           {cfg && !showCfg && (
-            <p className="cb-note">지금 제출: <b>{cfg.openRound}</b> · 명렬표 {cfg.classes.length}개 반 · 촬영 최대 {cfg.maxSeconds}초 · 다시 제출 {cfg.allowResubmit ? '허용' : '막음'} · 영상 저장: {cfg.driveOn ? <span className="cb-drive-status ok">구글 드라이브{cfg.driveEmail ? ` (${cfg.driveEmail})` : ''}</span> : <span className="cb-drive-status">수파베이스 (1GB)</span>}</p>
+            <p className="cb-note">받는 회차: <b>{cfg.rounds.join(' · ')}</b> · 명렬표 {cfg.classes.length}개 반 · 촬영 최대 {cfg.maxSeconds}초 · 다시 제출 {cfg.allowResubmit ? '허용' : '막음'} · 영상 저장: {cfg.driveOn ? <span className="cb-drive-status ok">구글 드라이브{cfg.driveEmail ? ` (${cfg.driveEmail})` : ''}</span> : <span className="cb-drive-status">수파베이스 (1GB)</span>}</p>
           )}
           {cfg && showCfg && (
             <div className="cb-settings">
               <div className="cb-grid">
-                <label>평가 회차 <span className="cb-sub">한 줄에 하나. 회차마다 드라이브 폴더가 따로 생깁니다</span>
+                <label>평가 회차 <span className="cb-sub">한 줄에 하나. 여기 적힌 회차가 학생 화면에 모두 보이고, 학생이 골라서 냅니다. 받지 않을 회차는 줄을 지우세요. 회차마다 드라이브 폴더가 따로 생깁니다(캐치볼 제출 › 회차 › 반 › 날짜)</span>
                   <textarea style={{ minHeight: 70 }} value={cfgDraft.roundsText} onChange={(e) => setCfgDraft({ ...cfgDraft, roundsText: e.target.value })} placeholder={'수행평가 1\n수행평가 2'} />
-                </label>
-                <label>지금 학생이 제출하는 회차
-                  <select value={cfgDraft.openRound} onChange={(e) => setCfgDraft({ ...cfgDraft, openRound: e.target.value })}>
-                    {[...new Set(cfgDraft.roundsText.split(/\r?\n/).map((x) => x.trim()).filter(Boolean))].map((r) => <option key={r} value={r}>{r}</option>)}
-                  </select>
-                  <span className="cb-sub">학생 화면 맨 위에 "지금 제출: {cfgDraft.openRound}"로 보이고, 영상은 캐치볼 제출 › {cfgDraft.openRound} › 반 › 날짜 폴더로 갑니다.</span>
                 </label>
               </div>
               <label>명렬표 <span className="cb-sub">반 이름 줄("1학년 3반") 다음 줄에 이름들을 쉼표나 띄어쓰기로. 학생은 여기서 골라 제출합니다. 비워 두면 이름을 직접 적습니다.</span>

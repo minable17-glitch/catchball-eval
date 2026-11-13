@@ -18,6 +18,7 @@ export default function Upload() {
     try { className = JSON.parse(localStorage.getItem(LAST_KEY) || '{}').className || ''; } catch { /* 무시 */ }
     return { date: todayKST(), className, student1: '', student2: '' };
   });
+  const [round, setRound] = useState(''); // 학생이 고른 평가 회차
   const [file, setFile] = useState(null);
   const [status, setStatus] = useState('idle'); // idle | compressing | uploading | done | error
   const [message, setMessage] = useState('');
@@ -31,7 +32,7 @@ export default function Upload() {
     let cancelled = false;
     getPublicSettings()
       .then((s) => { if (!cancelled) setSettings(s); })
-      .catch((e) => { if (!cancelled) { setSettingsErr(e?.message || '설정을 불러오지 못했습니다.'); setSettings({ classes: [], guideText: '', maxSeconds: 60, driveOn: false, allowResubmit: true, rounds: ['수행평가 1'], openRound: '수행평가 1' }); } });
+      .catch((e) => { if (!cancelled) { setSettingsErr(e?.message || '설정을 불러오지 못했습니다.'); setSettings({ classes: [], guideText: '', maxSeconds: 60, driveOn: false, allowResubmit: true, rounds: ['수행평가 1'] }); } });
     return () => { cancelled = true; };
   }, []);
 
@@ -41,14 +42,18 @@ export default function Upload() {
   const students = currentClass?.students || [];
   const guide = settings?.guideText?.trim() || DEFAULT_GUIDE;
 
+  const rounds = settings?.rounds?.length ? settings.rounds : ['수행평가 1'];
+  const chosenRound = rounds.length === 1 ? rounds[0] : round;
+
   const validateInfo = () => {
+    if (!chosenRound) return '몇 번째 수행평가인지 먼저 골라 주세요.';
     if (!info.className.trim() || !info.student1.trim() || !info.student2.trim()) return useRoster ? '반과 두 사람 이름을 모두 골라 주세요.' : '반과 두 사람 이름을 모두 적어 주세요.';
     if (info.student1.trim() === info.student2.trim()) return '두 사람 이름이 같아요. 다시 골라 주세요.';
     try { localStorage.setItem(LAST_KEY, JSON.stringify({ className: info.className.trim() })); } catch { /* 무시 */ }
     return null;
   };
 
-  const cleanInfo = () => ({ round: settings?.openRound || '', className: info.className.trim(), student1: info.student1.trim(), student2: info.student2.trim(), date: info.date });
+  const cleanInfo = () => ({ round: chosenRound, className: info.className.trim(), student1: info.student1.trim(), student2: info.student2.trim(), date: info.date });
   const busy = status === 'compressing' || status === 'uploading';
 
   const start = async () => {
@@ -103,7 +108,7 @@ export default function Upload() {
       {status === 'done' && result ? (
         <section className="cb-card cb-done">
           <h2>✅ 제출 완료!</h2>
-          <p className="cb-big">{settings?.openRound} · {info.className} · {info.student1} · {info.student2}</p>
+          <p className="cb-big">{chosenRound} · {info.className} · {info.student1} · {info.student2}</p>
           <p className="cb-note">파일: {result.fileName} ({result.sizeMb}MB{result.originalMb ? `, 원본 ${result.originalMb}MB` : ''}) · {result.storage === 'drive' ? '선생님 구글 드라이브에 저장됨' : '서버에 저장됨'}</p>
           <button type="button" className="cb-btn big" onClick={reset}>다른 팀 영상 올리기</button>
         </section>
@@ -113,7 +118,14 @@ export default function Upload() {
           {settingsErr && <p className="cb-warn">⚠️ {settingsErr} (이름을 직접 적어 제출할 수 있어요)</p>}
           {settings && (
             <>
-              <div className="cb-round-badge">📝 지금 제출: <b>{settings.openRound}</b></div>
+              {rounds.length > 1 ? (
+                <div className="cb-round-pick">
+                  <div className="cb-round-pick-title">📝 어떤 수행평가를 내나요?</div>
+                  <div className="cb-mode">
+                    {rounds.map((r) => <button key={r} type="button" className={chosenRound === r ? 'on' : ''} onClick={() => setRound(r)} disabled={busy}>{r}</button>)}
+                  </div>
+                </div>
+              ) : <div className="cb-round-badge">📝 <b>{chosenRound}</b> 제출</div>}
               <div className="cb-tips cb-guide">
                 <b>📋 촬영 안내</b>
                 <p>{guide}</p>
@@ -158,7 +170,7 @@ export default function Upload() {
               )}
 
               {mode === 'live' && (
-                <LiveCapture key={`${settings.openRound}|${info.className}|${info.student1}|${info.student2}`} info={cleanInfo()} validate={validateInfo} maxSeconds={settings.maxSeconds} useDrive={settings.driveOn} onReset={reset} />
+                <LiveCapture key={`${chosenRound}|${info.className}|${info.student1}|${info.student2}`} info={cleanInfo()} validate={validateInfo} maxSeconds={settings.maxSeconds} useDrive={settings.driveOn} onReset={reset} />
               )}
 
               {mode === 'file' && (<>

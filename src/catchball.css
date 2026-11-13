@@ -190,3 +190,9 @@ input[type="range"] { width: 100%; accent-color: var(--cb-accent-dark); }
 .cb-round-tabs button { font: inherit; font-size: 0.85rem; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--cb-line); background: #fff; color: var(--cb-muted); cursor: pointer; }
 .cb-round-tabs button.on { background: var(--cb-accent); border-color: var(--cb-accent); color: #2b2000; font-weight: 700; }
 .cb-pill.round { background: #e8efff; color: #2a4fb0; }
+
+.cb-round-pick { margin-bottom: 12px; }
+.cb-round-pick-title { font-weight: 700; margin-bottom: 6px; }
+.cb-round-pick .cb-mode { grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); }
+.cb-round-pick .cb-mode button { font-size: 1rem; padding: 12px 6px; }
+.cb-round-pick .cb-mode button.on { background: var(--cb-accent); color: #2b2000; }
