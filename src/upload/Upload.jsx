@@ -3,6 +3,7 @@ import { DEFAULT_GUIDE, getPublicSettings, MAX_UPLOAD_BYTES, submitVideo } from 
 import { canCompress, compressVideo, extForMime } from '../compress.js';
 import { todayKST } from '../records.js';
 import { FILE_READ_HELP, probeFile } from '../drive.js';
+import { keepAwake } from '../keepAwake.js';
 import LiveCapture from './LiveCapture.jsx';
 import { canRecord } from '../live.js';
 
@@ -82,6 +83,7 @@ export default function Upload() {
     abortRef.current = controller;
 
     let blob = file, fileName = file.name, durationSec = null, compressNote = '';
+    const release = await keepAwake(); // 줄이고 올리는 동안 화면이 꺼지지 않게
     try {
       if (compress) {
         setStatus('compressing'); setProgress(0);
@@ -108,7 +110,7 @@ export default function Upload() {
       setStatus('error');
       if (e?.fileRead) { setMessage(''); setFileProblem(`${e.message}${e.detail ? ` (${e.detail})` : ''}`); }
       else setMessage(e?.message || '올리는 중 문제가 생겼습니다.');
-    }
+    } finally { release(); }
   };
 
   const reset = () => { setFileProblem(''); setFile(null); setStatus('idle'); setMessage(''); setResult(null); setInfo((v) => ({ ...v, student1: '', student2: '' })); };
@@ -218,6 +220,7 @@ export default function Upload() {
                   <div className="cb-progress-text dark">
                     {status === 'compressing' ? `영상 줄이는 중 ${Math.round(progress * 100)}%` : `${message || '올리는 중'} ${Math.round(progress * 100)}%${file && file.size > 30 * MB && !compress ? ` (${Math.round(progress * file.size / MB)}/${Math.round(file.size / MB)}MB)` : ''}`}
                   </div>
+                  <p className="cb-note" style={{ margin: '4px 0' }}>📱 끝날 때까지 <b>이 화면을 켜 둔 채로</b> 기다려 주세요. 다른 앱으로 가거나 화면이 꺼지면 올리기가 멈춥니다.</p>
                   <button type="button" className="cb-btn ghost" onClick={() => abortRef.current?.abort()}>취소</button>
                 </div>
               )}

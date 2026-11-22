@@ -1,6 +1,21 @@
 // 구글 드라이브 저장. 파라런과 같은 방식: 선생님이 한 번 "구글 드라이브 연결"로 허락해 두면,
 // 엣지 함수(supabase/functions/catchball-drive)가 그 열쇠로 업로드 주소를 열어 주고 학생 폰이 선생님 드라이브로 바로 올림.
 import { supabase, supabaseAnonKey, supabaseUrl } from './supabase.js';
+import { waitUsable } from './keepAwake.js';
+
+const STALL_MS = 40000; // 이만큼 아무것도 안 올라가면 멈춘 것으로 보고 끊고 다시 시도
+// 전송이 조용히 멈추는 경우(이동통신에서 흔함)를 잡는 감시: 진행이 없으면 abort → onerror 대신 여기서 실패 처리
+function watchStall(xhr, reject) {
+  let last = Date.now();
+  const tick = () => { last = Date.now(); };
+  xhr.upload.addEventListener('progress', tick);
+  xhr.addEventListener('readystatechange', tick);
+  const id = setInterval(() => {
+    if (document.visibilityState !== 'visible') { last = Date.now(); return; } // 화면이 꺼진 동안은 세지 않음
+    if (Date.now() - last > STALL_MS) { clearInterval(id); try { xhr.abort(); } catch { /* 무시 */ } reject(Object.assign(new Error('전송이 멈췄습니다.'), { network: true, detail: '멈춤' })); }
+  }, 5000);
+  xhr.addEventListener('loadend', () => clearInterval(id));
+}
 
 const FN_URL = `${supabaseUrl}/functions/v1/catchball-drive`;
 const RELAY_CHUNK = 4 * 1024 * 1024; // 예비 경로 조각 크기 (256KB 배수)
@@ -90,6 +105,7 @@ async function putDirect(uploadUrl, blob, onProgress) {
     xhr.onerror = () => reject(new Error('드라이브에 바로 올리지 못했습니다.'));
     xhr.ontimeout = () => reject(new Error('드라이브 업로드 시간 초과'));
     xhr.timeout = 10 * 60 * 1000;
+    watchStall(xhr, reject);
     xhr.send(body);
   });
 }
@@ -118,6 +134,7 @@ async function putChunk(uploadUrl, blob, start, end, total, onProgress) {
     xhr.onerror = () => reject(Object.assign(new Error('인터넷 연결이 끊겼습니다.'), { network: true }));
     xhr.ontimeout = () => reject(Object.assign(new Error('드라이브 업로드 시간 초과'), { network: true }));
     xhr.timeout = 5 * 60 * 1000;
+    watchStall(xhr, reject);
     xhr.send(body);
   });
 }
@@ -136,9 +153,10 @@ async function putDirectChunked(uploadUrl, blob, onProgress, onStatus) {
     } catch (e) {
       if (e.fileRead) throw e; // 파일을 못 읽는 것은 다시 해도 소용없음
       if (offset === 0 && !e.network) throw e; // 처음부터 막히면(브라우저가 막음 등) 다른 길로
-      if (++failures > (offset === 0 ? 2 : 5)) throw e; // 한 조각도 못 보냈으면 오래 끌지 않고 다른 길로
-      onStatus?.(`연결이 끊겨 다시 시도하는 중... (${failures}/5)`);
-      await sleep(2000 * failures);
+      if (++failures > (offset === 0 ? 2 : 8)) throw Object.assign(e, { detail: `${e.detail || '끊김'} @${Math.round(offset / 1048576)}MB` }); // 한 조각도 못 보냈으면 오래 끌지 않고 다른 길로
+      onStatus?.(`연결이 끊겨 이어서 올리는 중... (${failures}번째)`);
+      await sleep(Math.min(15000, 2000 * failures));
+      await waitUsable(); // 화면이 꺼졌거나 인터넷이 끊긴 동안은 기다렸다가
       try {
         const st = await putChunk(uploadUrl, blob, 0, 0, total);
         if (st.done) return st.file;
@@ -169,9 +187,10 @@ async function putRelay(uploadUrl, blob, onProgress, onStatus) {
         if (r.done) return r.file;
         break;
       } catch (e) {
-        if (e.fileRead || attempt >= 4) throw e;
-        onStatus?.(`연결이 끊겨 다시 시도하는 중... (${attempt}/3)`);
+        if (e.fileRead || attempt >= 6) throw Object.assign(e, { detail: `${e.detail || '중계 끊김'} @${Math.round(start / 1048576)}MB` });
+        onStatus?.(`연결이 끊겨 이어서 올리는 중... (${attempt}번째)`);
         await sleep(2000 * attempt);
+        await waitUsable();
       }
     }
   }

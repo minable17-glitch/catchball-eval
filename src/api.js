@@ -2,6 +2,7 @@
 // 영상은 storage 버킷 catchball-videos 에, 제출 목록·채점 결과는 RPC(supabase/catchball.sql)로 저장.
 import { supabase, supabaseAnonKey, supabaseUrl, VIDEO_BUCKET } from './supabase.js';
 import { fetchDriveVideo, trashDriveFile, uploadToDrive } from './drive.js';
+import { keepAwake } from './keepAwake.js';
 
 export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 버킷 파일 크기 제한
 
@@ -125,7 +126,12 @@ export const isDrivePath = (path) => typeof path === 'string' && path.startsWith
  * 영상 제출 전체 흐름: 드라이브가 연결돼 있으면 드라이브로, 아니면 수파베이스 storage 로 올린 뒤 제출 기록(RPC)
  * onStatus(text), onProgress(0~1)
  */
-export async function submitVideo({ info, blob, fileName, durationSec = null, playerMarks = null, useDrive = false, onStatus, onProgress }) {
+export async function submitVideo(opts) {
+  const release = await keepAwake(); // 올리는 동안 화면이 꺼지지 않게
+  try { return await submitVideoInner(opts); } finally { release(); }
+}
+
+async function submitVideoInner({ info, blob, fileName, durationSec = null, playerMarks = null, useDrive = false, onStatus, onProgress }) {
   let path, driveFileId = null, driveLink = null, finalName = safeName(fileName), size = blob.size;
   // 다시 제출이 막혀 있으면 영상을 올리기 전에 알려 줌 (v2 SQL 전 서버면 건너뜀)
   try {
@@ -149,7 +155,7 @@ export async function submitVideo({ info, blob, fileName, durationSec = null, pl
       if (blob.size > MAX_UPLOAD_BYTES) {
         const mb = Math.round(blob.size / 1048576);
         const why = /fetch|network|연결/i.test(e?.message || '') ? '인터넷 연결이 끊겨' : (e?.message || '알 수 없는 문제로');
-        throw new Error(`드라이브에 올리지 못했어요 (${why}). 영상이 ${mb}MB로 커서 오래 걸립니다. 와이파이에서 다시 올리거나, "바로 촬영해서 제출"로 찍으면 10MB 안팎이라 금방 올라갑니다.`);
+        throw new Error(`드라이브에 올리지 못했어요 (${why}). 영상이 ${mb}MB로 커서 오래 걸립니다. 화면을 켜 둔 채로 다시 올리거나, 와이파이에서 올리거나, "바로 촬영해서 제출"로 찍으면 10MB 안팎이라 금방 올라갑니다.${e?.detail ? ` [${e.detail}]` : ''}`);
       }
       note = '드라이브에 못 올려 서버에 대신 저장했어요. (' + (e?.message || '') + ')';
       onStatus?.('드라이브 대신 서버에 올리는 중...');
