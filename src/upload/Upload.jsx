@@ -28,7 +28,7 @@ export default function Upload() {
   const [message, setMessage] = useState('');
   const [progress, setProgress] = useState(0);
   const [result, setResult] = useState(null);
-  const [compress, setCompress] = useState(canCompress());
+  const [compress, setCompress] = useState(false); // 기본은 줄이지 않고 원본 그대로 (1분 안쪽 영상은 그대로도 잘 올라감)
   const [mode, setMode] = useState(() => (canRecord() ? 'live' : 'file')); // live: 앱 안에서 촬영 / file: 찍어 둔 영상
   const abortRef = useRef(null);
 
@@ -98,7 +98,7 @@ export default function Upload() {
           compressNote = `영상 줄이기가 안 되어(${String(e?.message || e?.name || '').slice(0, 40)}) 원본(${Math.round(file.size / MB)}MB)을 그대로 올립니다. 시간이 걸릴 수 있어요.`;
         }
       }
-      if (!settings?.driveOn && blob.size > MAX_UPLOAD_BYTES) throw new Error(`영상이 너무 큽니다 (${Math.round(blob.size / MB)}MB). "올리기 전에 영상 줄이기"를 켜거나 더 짧게 찍어 주세요.`);
+      if (!settings?.driveOn && blob.size > MAX_UPLOAD_BYTES) throw new Error(`영상이 너무 큽니다 (${Math.round(blob.size / MB)}MB). "영상을 줄여서 올리기"를 켜거나 더 짧게 찍어 주세요.`);
       setStatus('uploading'); setProgress(0);
       const r = await submitVideo({ info: cleanInfo(), blob, fileName, durationSec, useDrive: !!settings?.driveOn, onStatus: (m) => setMessage(compressNote ? `${compressNote} ${m}` : m), onProgress: setProgress });
       setResult({ ...r, sizeMb: Math.round(blob.size / MB * 10) / 10, originalMb: Math.round(file.size / MB * 10) / 10 });
@@ -197,7 +197,7 @@ export default function Upload() {
                 <input type="file" accept="video/*" onChange={(e) => pickFile(e.target.files?.[0])} disabled={busy} />
                 <span>{file ? `📼 ${file.name} (${Math.round(file.size / MB)}MB)` : '여기를 눌러 앨범에서 영상 고르기'}</span>
                 <small>캐치볼하는 두 사람이 옆모습으로 한 화면에 나오게 찍은 영상이어야 합니다.</small>
-                {file && file.size > 100 * MB && <small style={{ color: '#a4262c', fontWeight: 700 }}>영상이 커요({Math.round(file.size / MB)}MB). 줄이는 데 영상 길이만큼, 올리는 데 시간이 더 걸립니다. 와이파이에서 올리거나 "바로 촬영해서 제출"을 쓰면 빠릅니다.</small>}
+                {file && file.size > 100 * MB && <small style={{ color: '#a4262c', fontWeight: 700 }}>영상이 커요({Math.round(file.size / MB)}MB). 올리는 데 1~3분쯤 걸릴 수 있어요. 화면을 켜 둔 채로 기다려 주세요.</small>}
               </label>
 
               {fileProblem && <p className="cb-error" style={{ marginTop: 10 }}>⚠️ {fileProblem}</p>}
@@ -210,7 +210,7 @@ export default function Upload() {
               {canCompress() && (
                 <label className="cb-check" style={{ marginTop: 10 }}>
                   <input type="checkbox" checked={compress} onChange={(e) => setCompress(e.target.checked)} disabled={busy} />
-                  올리기 전에 영상 줄이기 (권장. 데이터와 시간을 아낍니다. 영상 길이만큼 걸립니다)
+                  영상을 줄여서 올리기 (선택. 데이터가 부족할 때만 켜세요. 영상 길이만큼 더 걸리고, 일부 폰에서는 안 됩니다)
                 </label>
               )}
 
