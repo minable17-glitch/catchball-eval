@@ -75,3 +75,10 @@ export function exportRecordsToExcel(records) {
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(detail), '캐치시점');
   XLSX.writeFile(wb, `캐치볼_평가기록_${todayKST()}.xlsx`);
 }
+
+// 점수표 엑셀: sheets = [{ name, rows: [{...}] }]
+export function exportSheetsToExcel(sheets, fileBase) {
+  const wb = XLSX.utils.book_new();
+  for (const sh of sheets) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sh.rows), String(sh.name).slice(0, 31));
+  XLSX.writeFile(wb, `${fileBase}_${todayKST()}.xlsx`);
+}

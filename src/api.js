@@ -63,7 +63,15 @@ export const DEFAULT_GUIDE = '두 사람이 옆모습으로 한 화면에 다 �
 
 function rowsToMap(rows) { const m = {}; for (const r of rows || []) m[r.key] = r.value ?? ''; return m; }
 
+// 이름 뒤의 성별 표시 "(남)" "(여)" 떼기 → { name, gender }
+const GENDER_RE = /^(.+?)\s*[(（]\s*(남|여)\s*[)）]$/;
+export function splitGender(token) {
+  const m = GENDER_RE.exec(String(token || '').trim());
+  return m ? { name: m[1].trim(), gender: m[2] } : { name: String(token || '').trim(), gender: '' };
+}
+
 // 명렬표 글: "1학년 3반" 줄 다음에 이름들(쉼표·띄어쓰기·줄바꿈 구분). 반 줄은 "반"으로 끝나거나 #, [ 로 시작.
+// 이름 뒤에 (남)/(여)를 붙이면 채점할 때 만점 기준을 자동으로 고름. 예: "김민수(남), 이영희(여)"
 export function parseRoster(text) {
   const classes = [];
   let cur = null;
@@ -71,12 +79,17 @@ export function parseRoster(text) {
     const line = raw.trim();
     if (!line) continue;
     if (/^[#[]/.test(line) || /반\s*\]?\s*$/.test(line)) {
-      cur = { name: line.replace(/^[#[]\s*|\s*\]$/g, '').trim(), students: [] };
+      cur = { name: line.replace(/^[#[]\s*|\s*\]$/g, '').trim(), students: [], genders: {} };
       classes.push(cur);
       continue;
     }
-    if (!cur) { cur = { name: '', students: [] }; classes.push(cur); }
-    for (const n of line.split(/[,，、·/\s]+/)) { const nm = n.trim(); if (nm && !cur.students.includes(nm)) cur.students.push(nm); }
+    if (!cur) { cur = { name: '', students: [], genders: {} }; classes.push(cur); }
+    for (const n of line.split(/[,，、·/\s]+/)) {
+      const { name: nm, gender } = splitGender(n);
+      if (!nm) continue;
+      if (!cur.students.includes(nm)) cur.students.push(nm);
+      if (gender) cur.genders[nm] = gender;
+    }
   }
   return classes.filter((c) => c.students.length);
 }
@@ -87,8 +100,29 @@ function parseRounds(text) {
   return list.length ? [...new Set(list)] : [DEFAULT_ROUND];
 }
 
+// 만점 기준: { 회차: { 남: 개수, 여: 개수 } }
+export const DEFAULT_RULES = { '수행평가 1': { 남: 10, 여: 5 }, '수행평가 2': { 남: 8, 여: 5 } };
+const FALLBACK_RULE = { 남: 10, 여: 5 };
+function parseRules(text) {
+  let obj = null;
+  try { obj = JSON.parse(text || ''); } catch { /* 기본값 */ }
+  const out = { ...DEFAULT_RULES };
+  if (obj && typeof obj === 'object') {
+    for (const [round, v] of Object.entries(obj)) {
+      const m = Math.max(1, Math.min(100, Math.round(Number(v?.남)) || 0)), f = Math.max(1, Math.min(100, Math.round(Number(v?.여)) || 0));
+      out[round] = { 남: m || FALLBACK_RULE.남, 여: f || FALLBACK_RULE.여 };
+    }
+  }
+  return out;
+}
+export function maxFor(rules, round, gender) {
+  const r = rules?.[round] || FALLBACK_RULE;
+  return gender === '여' ? r.여 : gender === '남' ? r.남 : null;
+}
+
 function normalizeSettings(m) {
   return {
+    scoreRules: parseRules(m.score_rules),
     roster: m.roster || '',
     classes: parseRoster(m.roster || ''),
     guideText: m.guide_text || '',
@@ -243,7 +277,7 @@ export async function listSubmissions() {
     id: r.id,
     submittedAt: r.created_at,
     date: r.eval_date,
-    className: r.class_name, student1: r.student1, student2: r.student2,
+    className: r.class_name, student1: splitGender(r.student1).name, student2: splitGender(r.student2).name,
     path: r.storage_path, fileName: r.file_name,
     sizeMb: r.size_bytes ? Math.round(r.size_bytes / 1048576 * 10) / 10 : 0,
     durationSec: r.duration_sec,
@@ -330,4 +364,27 @@ export async function saveLabels(submissionId, labels) {
 
 export async function deleteLabels(submissionId) {
   return rpc('catchball_delete_labels', { p_submission_id: submissionId });
+}
+
+// ── 직접 채점 점수 (학생별·회차별 성공 개수) ──
+
+export async function listScores() {
+  const rows = (await rpc('catchball_list_scores')) || [];
+  return rows.map((r) => ({
+    id: r.id, className: r.class_name, student: r.student, round: r.eval_round,
+    gender: r.gender || '', count: r.count, max: r.max_count, memo: r.memo || '',
+    submissionId: r.submission_id, updatedAt: r.updated_at,
+  }));
+}
+
+// scores: [{ className, student, round, gender, count, max, memo }]
+export async function saveScores(submissionId, scores) {
+  return rpc('catchball_save_scores', {
+    p_submission_id: submissionId || null,
+    p_scores: scores.map((x) => ({ class_name: x.className, student: x.student, round: x.round, gender: x.gender, count: x.count, max: x.max, memo: x.memo || '' })),
+  });
+}
+
+export async function deleteScore(id) {
+  return rpc('catchball_delete_score', { p_id: id });
 }

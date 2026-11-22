@@ -2,10 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DEFAULT_BALL_PARAMS, DEFAULT_EVENT_PARAMS, detectEvents, makeColorMask, sampleBallParams, summarize } from './analysis.js';
 import { analyzeVideo, previewMask } from './analyzer.js';
 import { loadPoseLandmarker } from './pose.js';
-import { addRecord, deleteRecord, exportRecordsToExcel, loadRecords, todayKST } from './records.js';
-import { DEFAULT_GUIDE, DEFAULT_ROUND, deleteSubmission, fetchVideo, getSavedTeacherUsername, getSettings, listLabelCounts, listResults, listSubmissions, parseRoster, saveResult, setSetting, teacherLogin, teacherLogout, teacherMe, teacherSignup } from './api.js';
+import { addRecord, deleteRecord, exportRecordsToExcel, exportSheetsToExcel, loadRecords, todayKST } from './records.js';
+import { DEFAULT_GUIDE, DEFAULT_ROUND, deleteSubmission, fetchVideo, getSavedTeacherUsername, getSettings, listLabelCounts, listResults, listScores, listSubmissions, maxFor, parseRoster, saveResult, setSetting, teacherLogin, teacherLogout, teacherMe, teacherSignup } from './api.js';
 import { disconnectDrive as driveDisconnect, driveStatus, startDriveConnect } from './drive.js';
 import Label from './Label.jsx';
+import Grade from './Grade.jsx';
 
 const FPS_OPTIONS = [
   { value: 10, label: '빠르게 (초당 10장)' },
@@ -82,12 +83,16 @@ export default function App() {
   const [sheetResults, setSheetResults] = useState([]);
   const [labelCounts, setLabelCounts] = useState({}); // submissionId → {n, nPresent}
   const [labeling, setLabeling] = useState(null); // 공 표시 중인 제출물
+  const [grading, setGrading] = useState(null); // 직접 채점 중인 제출물
+  const [scores, setScores] = useState([]); // 학생별·회차별 점수
+  const [scoresReady, setScoresReady] = useState(true); // 점수 표(v4 SQL)가 있는지
+  const [scoreClass, setScoreClass] = useState(''); // 점수표에서 보는 반
   const [fetchingId, setFetchingId] = useState(null);
   const [fetchPct, setFetchPct] = useState(null);
   const [currentSubmissionId, setCurrentSubmissionId] = useState(null);
   // ── 제출 설정 (명렬표, 촬영 안내, 촬영 시간, 드라이브 연결) ──
   const [cfg, setCfg] = useState(null); // 서버에서 읽은 설정
-  const [cfgDraft, setCfgDraft] = useState({ roster: '', guideText: '', maxSeconds: 60, allowResubmit: true, roundsText: '', openRound: '' });
+  const [cfgDraft, setCfgDraft] = useState({ roster: '', guideText: '', maxSeconds: 60, allowResubmit: true, roundsText: '', openRound: '', rules: {} });
   const [roundFilter, setRoundFilter] = useState('전체'); // 제출 목록·결과 표를 회차별로 보기
   const [cfgMsg, setCfgMsg] = useState('');
   const [cfgBusy, setCfgBusy] = useState(false);
@@ -117,13 +122,14 @@ export default function App() {
 
   // ── 선생님 로그인 / 제출 목록 ──
   const refreshFromServer = useCallback(async () => {
-    const [subs, res, counts, st] = await Promise.all([listSubmissions(), listResults(), listLabelCounts().catch(() => ({})), getSettings().catch((e) => { console.warn('설정 읽기 실패 (v2 SQL 실행 전?)', e); return null; })]);
+    const [subs, res, counts, st, sc] = await Promise.all([listSubmissions(), listResults(), listLabelCounts().catch(() => ({})), getSettings().catch((e) => { console.warn('설정 읽기 실패 (v2 SQL 실행 전?)', e); return null; }), listScores().catch((e) => { console.warn('점수 읽기 실패 (v4 SQL 실행 전?)', e); return null; })]);
     setSubmissions(subs);
+    setScores(sc || []); setScoresReady(sc != null);
     setSheetResults(res);
     setLabelCounts(counts || {});
     if (st) {
       setCfg(st);
-      setCfgDraft({ roster: st.roster, guideText: st.guideText, maxSeconds: st.maxSeconds, allowResubmit: st.allowResubmit, roundsText: st.rounds.join('\n'), openRound: st.openRound });
+      setCfgDraft({ roster: st.roster, guideText: st.guideText, maxSeconds: st.maxSeconds, allowResubmit: st.allowResubmit, roundsText: st.rounds.join('\n'), openRound: st.openRound, rules: st.scoreRules });
       setDriveState((d) => (d.status === 'checking' || d.msg ? d : st.driveOn ? { status: 'ok', msg: '', email: st.driveEmail } : { status: 'none', msg: '', email: '' }));
     }
   }, []);
@@ -192,6 +198,7 @@ export default function App() {
       if (rounds.length) {
         await setSetting('rounds', rounds.join('\n'));
       }
+      try { await setSetting('score_rules', JSON.stringify(cfgDraft.rules || {})); } catch (e) { console.warn('만점 기준 저장 실패 (v4 SQL 실행 전?)', e); }
       const st = await getSettings();
       setCfg(st);
       setCfgMsg(`저장했습니다. 명렬표 ${st.classes.length}개 반, ${st.classes.reduce((n, c) => n + c.students.length, 0)}명.`);
@@ -582,6 +589,41 @@ export default function App() {
   const inRound = (x) => roundFilter === '전체' || (x.round || DEFAULT_ROUND) === roundFilter;
   const shownSubs = submissions.filter(inRound);
   const shownResults = sheetResults.filter(inRound);
+  const genderOf = (className, name) => cfg?.classes?.find((c) => c.name === className)?.genders?.[name] || '';
+  const scoreOf = (className, name, round) => scores.find((x) => x.className === className && x.student === name && x.round === round) || null;
+  const rules = cfg?.scoreRules || {};
+  // 채점 중인 영상 다음으로 넘어갈 영상: 목록에서 아래쪽의 미채점 → 없으면 위쪽의 미채점
+  const nextUngraded = (cur) => {
+    const i = shownSubs.findIndex((x) => x.id === cur.id);
+    const rest = [...shownSubs.slice(i + 1), ...shownSubs.slice(0, Math.max(0, i))];
+    return rest.find((x) => x.status !== '채점완료') || null;
+  };
+  const gradingNext = grading ? nextUngraded(grading) : null;
+  // 점수표: 반별로 명렬표 순서대로, 회차마다 점수
+  const scoreRounds = cfg?.rounds?.length ? [...new Set([...cfg.rounds, ...scores.map((x) => x.round)])] : [...new Set(scores.map((x) => x.round))];
+  const scoreClasses = [...new Set([...(cfg?.classes || []).map((c) => c.name), ...scores.map((x) => x.className)])].filter(Boolean);
+  const curScoreClass = scoreClasses.includes(scoreClass) ? scoreClass : scoreClasses[0] || '';
+  const scoreRowsFor = (className) => {
+    const cls = cfg?.classes?.find((c) => c.name === className);
+    const names = [...new Set([...(cls?.students || []), ...scores.filter((x) => x.className === className).map((x) => x.student)])];
+    return names.map((name, i) => {
+      const cells = scoreRounds.map((r) => scoreOf(className, name, r));
+      return { no: cls?.students?.includes(name) ? cls.students.indexOf(name) + 1 : '', name, gender: genderOf(className, name) || cells.find((c) => c?.gender)?.gender || '', cells, key: `${name}-${i}` };
+    });
+  };
+  const exportScores = () => {
+    const sheets = scoreClasses.map((cn) => ({
+      name: cn,
+      rows: scoreRowsFor(cn).map((row) => {
+        const o = { 번호: row.no, 이름: row.name, 성별: row.gender };
+        scoreRounds.forEach((r, k) => { const c = row.cells[k]; o[`${r} 성공`] = c ? c.count : ''; o[`${r} 만점기준`] = c ? c.max : ''; o[`${r} 만점`] = c ? (c.count >= c.max ? 'O' : '') : ''; });
+        return o;
+      }),
+    })).filter((sh) => sh.rows.length);
+    if (!sheets.length) { setToast('아직 점수가 없습니다.'); return; }
+    exportSheetsToExcel(sheets, '캐치볼_점수표');
+  };
+
   const roundTabs = roundList.length > 1 && (
     <div className="cb-round-tabs">
       {['전체', ...roundList].map((r) => <button key={r} type="button" className={roundFilter === r ? 'on' : ''} onClick={() => setRoundFilter(r)}>{r}{r !== '전체' ? ` (${submissions.filter((x) => x.round === r).length})` : ''}</button>)}
@@ -593,7 +635,7 @@ export default function App() {
     <div className="cb-app">
       <header className="cb-header">
         <h1>⚾ 캐치볼 영상 평가 <span className="cb-sub">선생님</span></h1>
-        <p>영상을 올리면 노란 공과 아이들의 손을 찾아 몇 번 주고받았는지 자동으로 셉니다. 영상은 이 기기 밖으로 나가지 않습니다.</p>
+        <p>학생이 제출한 영상 목록에서 "채점"을 누르면 영상을 보면서 성공 개수를 체크하고, 점수표에 모입니다. 공과 손을 자동으로 찾아 세는 "자동 분석"은 참고용입니다.</p>
       </header>
 
       {/* 0. 선생님 로그인 */}
@@ -622,6 +664,14 @@ export default function App() {
           </>
         )}
       </section>
+
+      {grading && (
+        <section className="cb-card">
+          <Grade key={grading.id} submission={grading} rules={rules} genderOf={genderOf} scores={scores} scoresReady={scoresReady}
+            onClose={() => setGrading(null)} onSaved={() => refreshFromServer().catch(() => {})}
+            onNext={gradingNext ? () => setGrading(gradingNext) : null} />
+        </section>
+      )}
 
       {/* 1. 학생 정보 */}
       <section className="cb-card">
@@ -738,7 +788,7 @@ export default function App() {
       {/* 제출된 영상 (로그인 시) */}
       {apiReady && (
         <section className="cb-card">
-          <h2>📥 학생이 제출한 영상 <span className="cb-sub">{submissions.length}건 · "공 표시"로 학습 자료를 모읍니다</span>
+          <h2>📥 학생이 제출한 영상 <span className="cb-sub">{submissions.length}건 · "채점"을 누르면 영상을 보며 직접 채점합니다</span>
             <button type="button" className="cb-link" style={{ padding: 0, marginLeft: 'auto' }} onClick={() => refreshFromServer().catch((e) => setToast(e?.message || '새로고침 실패'))}>새로고침</button>
           </h2>
           {roundTabs}
@@ -753,15 +803,49 @@ export default function App() {
                     <div><b>{it.student1} · {it.student2}</b> <span className="cb-sub">{it.className}</span>
                       <span className="cb-pill round">{it.round}</span><span className={`cb-pill ${it.status === '채점완료' ? 'done' : ''}`}>{it.status || '미채점'}</span></div>
                     <div className="meta">{it.date} · {it.sizeMb}MB{it.durationSec ? ` · ${fmtTime(it.durationSec)}` : ''}{it.playerMarks?.length === 2 ? ' · 학생 자리 표시됨' : ''}{it.autoSuccess != null ? ` · 촬영 중 자동 카운트: 성공 ${it.autoSuccess} · 실패 ${it.autoFail}` : ''}{it.driveLink ? <> · <a href={it.driveLink} target="_blank" rel="noreferrer">드라이브에서 보기</a></> : ''}</div>
+                    {[it.student1, it.student2].some((n) => scoreOf(it.className, n, it.round)) && (
+                      <div className="meta">{[it.student1, it.student2].map((n) => { const sc = scoreOf(it.className, n, it.round); return sc ? <span key={n} className={`cb-score-chip ${sc.count >= sc.max ? 'full' : ''}`}>{n} {sc.count}/{sc.max}{sc.count >= sc.max ? ' 만점' : ''}</span> : <span key={n} className="cb-score-chip">{n} -</span>; })}</div>
+                    )}
                   </div>
                   <div className="cb-row" style={{ margin: 0 }}>
-                    <button type="button" className="cb-btn" onClick={() => gradeSubmission(it)} disabled={busy || fetchingId != null}>{fetchingId === it.id ? (fetchPct != null ? `가져오는 중 ${fetchPct}%` : '가져오는 중...') : it.status === '채점완료' ? '다시 채점' : '채점'}</button>
+                    <button type="button" className="cb-btn" onClick={() => setGrading(it)} disabled={busy}>{it.status === '채점완료' ? '다시 채점' : '채점'}</button>
+                    <button type="button" className="cb-btn ghost" onClick={() => gradeSubmission(it)} disabled={busy || fetchingId != null} title="공과 손을 자동으로 찾아 세어 보기 (참고용)">{fetchingId === it.id ? (fetchPct != null ? `가져오는 중 ${fetchPct}%` : '가져오는 중...') : '자동 분석'}</button>
                     <button type="button" className="cb-btn ghost" onClick={() => setLabeling(it)} disabled={busy} title="학습 자료 만들기">{labelCounts[it.id]?.n ? `공 표시 ${labelCounts[it.id].n}장면` : '공 표시'}</button>
                     <button type="button" className="cb-x" title="영상 지우기" onClick={() => removeSubmission(it)}>✕</button>
                   </div>
                 </li>
               ))}
             </ul>
+          )}
+        </section>
+      )}
+
+      {/* 점수표 (로그인 시) */}
+      {apiReady && (
+        <section className="cb-card">
+          <h2>📊 점수표 <span className="cb-sub">직접 채점한 성공 개수 · 초록색은 만점</span>
+            <button type="button" className="cb-link" style={{ padding: 0, marginLeft: 'auto' }} onClick={exportScores}>📥 엑셀로 내려받기</button>
+          </h2>
+          {!scoresReady && <p className="cb-warn">⚠️ 점수를 저장할 표가 아직 없습니다. 수파베이스 SQL Editor 에서 <code>supabase/catchball_v4_scores.sql</code> 을 실행해 주세요.</p>}
+          {scoreClasses.length === 0 ? <p className="cb-note">명렬표를 넣거나 채점을 시작하면 여기에 반별 점수가 모입니다.</p> : (
+            <>
+              <div className="cb-round-tabs">
+                {scoreClasses.map((cn) => <button key={cn} type="button" className={curScoreClass === cn ? 'on' : ''} onClick={() => setScoreClass(cn)}>{cn}</button>)}
+              </div>
+              <div className="cb-table-wrap">
+                <table className="cb-table">
+                  <thead><tr><th>번호</th><th>이름</th><th>성별</th>{scoreRounds.map((r) => <th key={r}>{r}</th>)}</tr></thead>
+                  <tbody>
+                    {scoreRowsFor(curScoreClass).map((row) => (
+                      <tr key={row.key}>
+                        <td>{row.no}</td><td>{row.name}</td><td>{row.gender || '-'}</td>
+                        {row.cells.map((c, k) => <td key={scoreRounds[k]} className={c && c.count >= c.max ? 'full' : ''}>{c ? `${c.count}/${c.max}${c.count >= c.max ? ' 만점' : ''}` : (row.gender ? `-/${maxFor(rules, scoreRounds[k], row.gender)}` : '-')}</td>)}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
         </section>
       )}
@@ -783,10 +867,25 @@ export default function App() {
                   <textarea style={{ minHeight: 70 }} value={cfgDraft.roundsText} onChange={(e) => setCfgDraft({ ...cfgDraft, roundsText: e.target.value })} placeholder={'수행평가 1\n수행평가 2'} />
                 </label>
               </div>
-              <label>명렬표 <span className="cb-sub">반 이름 줄("1학년 3반") 다음 줄에 이름들을 쉼표나 띄어쓰기로. 학생은 여기서 골라 제출합니다. 비워 두면 이름을 직접 적습니다.</span>
+              <div className="cb-slider-group">
+                <div className="cb-slider-title">만점 기준 <small>(성공 개수. 채점 화면의 체크 칸 수가 됩니다)</small></div>
+                <div className="cb-rule-grid">
+                  {[...new Set(cfgDraft.roundsText.split(/\r?\n/).map((x) => x.trim()).filter(Boolean))].map((r) => {
+                    const cur = cfgDraft.rules?.[r] || { 남: 10, 여: 5 };
+                    const setRule = (g, v) => setCfgDraft({ ...cfgDraft, rules: { ...cfgDraft.rules, [r]: { ...cur, [g]: Math.max(1, Math.min(100, Number(v) || 1)) } } });
+                    return (
+                      <div key={r}><b>{r}</b>
+                        <span>남 <input type="number" min="1" max="100" value={cur.남} onChange={(e) => setRule('남', e.target.value)} aria-label={`${r} 남자 만점`} />개</span>
+                        <span>여 <input type="number" min="1" max="100" value={cur.여} onChange={(e) => setRule('여', e.target.value)} aria-label={`${r} 여자 만점`} />개</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+              <label>명렬표 <span className="cb-sub">이름 뒤에 (남)/(여)를 붙이면 채점할 때 만점 기준이 자동으로 골라집니다. 예: 김민수(남), 이영희(여). 반 이름 줄("1학년 3반") 다음 줄에 이름들을 쉼표나 띄어쓰기로. 학생은 여기서 골라 제출합니다. 비워 두면 이름을 직접 적습니다.</span>
                 <textarea value={cfgDraft.roster} onChange={(e) => setCfgDraft({ ...cfgDraft, roster: e.target.value })} placeholder={'1학년 3반\n김민수, 이영희, 박지훈\n1학년 4반\n...'} />
               </label>
-              <p className="cb-note" style={{ margin: 0 }}>지금 글로 읽히는 명렬표: {parseRoster(cfgDraft.roster).map((c) => `${c.name} ${c.students.length}명`).join(' · ') || '(없음)'}</p>
+              <p className="cb-note" style={{ margin: 0 }}>지금 글로 읽히는 명렬표: {parseRoster(cfgDraft.roster).map((c) => { const g = Object.values(c.genders); return `${c.name} ${c.students.length}명${g.length ? `(남 ${g.filter((x) => x === '남').length}·여 ${g.filter((x) => x === '여').length})` : ''}`; }).join(' · ') || '(없음)'}</p>
               <label>촬영 안내 <span className="cb-sub">학생 화면 맨 위에 보입니다. 비워 두면 기본 안내.</span>
                 <textarea style={{ minHeight: 70 }} value={cfgDraft.guideText} onChange={(e) => setCfgDraft({ ...cfgDraft, guideText: e.target.value })} placeholder={DEFAULT_GUIDE} />
               </label>
