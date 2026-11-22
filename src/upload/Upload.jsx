@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { DEFAULT_GUIDE, getPublicSettings, MAX_UPLOAD_BYTES, submitVideo } from '../api.js';
 import { canCompress, compressVideo, extForMime } from '../compress.js';
 import { todayKST } from '../records.js';
+import { FILE_READ_HELP, probeFile } from '../drive.js';
 import LiveCapture from './LiveCapture.jsx';
 import { canRecord } from '../live.js';
 
@@ -20,6 +21,8 @@ export default function Upload() {
   });
   const [round, setRound] = useState(''); // 학생이 고른 평가 회차
   const [file, setFile] = useState(null);
+  const [fileProblem, setFileProblem] = useState(''); // 고른 파일을 폰이 넘겨주지 않을 때의 안내
+  const pickSeq = useRef(0);
   const [status, setStatus] = useState('idle'); // idle | compressing | uploading | done | error
   const [message, setMessage] = useState('');
   const [progress, setProgress] = useState(0);
@@ -45,6 +48,16 @@ export default function Upload() {
   const rounds = settings?.rounds?.length ? settings.rounds : ['수행평가 1'];
   const chosenRound = rounds.length === 1 ? rounds[0] : round;
 
+  // 영상을 고르면 바로 읽어 봄: 못 읽는 파일이면 기다리게 하지 않고 곧바로 알려 줌
+  const pickFile = async (f) => {
+    const seq = ++pickSeq.current;
+    setFile(f || null); setFileProblem(''); setMessage(''); if (status === 'error') setStatus('idle');
+    if (!f) return;
+    if (f.type && !/^video\//.test(f.type) && !/\.(mp4|mov|m4v|webm|mkv|3gp)$/i.test(f.name)) { setFileProblem('영상 파일이 아니에요. 영상을 골라 주세요.'); return; }
+    try { await probeFile(f); }
+    catch (e) { if (seq === pickSeq.current) setFileProblem(`${e?.message || FILE_READ_HELP}${e?.detail ? ` (${e.detail})` : ''}`); }
+  };
+
   const validateInfo = () => {
     if (!chosenRound) return '몇 번째 수행평가인지 먼저 골라 주세요.';
     if (!info.className.trim() || !info.student1.trim() || !info.student2.trim()) return useRoster ? '반과 두 사람 이름을 모두 골라 주세요.' : '반과 두 사람 이름을 모두 적어 주세요.';
@@ -60,6 +73,9 @@ export default function Upload() {
     const err = validateInfo();
     if (err) { setMessage(err); return; }
     if (!file) { setMessage('영상을 먼저 골라 주세요.'); return; }
+    try { await probeFile(file); }
+    catch (e) { setStatus('error'); setFileProblem(`${e?.message || FILE_READ_HELP}${e?.detail ? ` (${e.detail})` : ''}`); return; }
+    setFileProblem('');
     setMessage('');
     setResult(null);
     const controller = new AbortController();
@@ -77,7 +93,7 @@ export default function Upload() {
         } catch (e) {
           if (e?.name === 'AbortError') throw e;
           console.warn('압축 실패, 원본을 그대로 올립니다', e);
-          compressNote = `영상 줄이기가 안 되어 원본(${Math.round(file.size / MB)}MB)을 그대로 올립니다. 시간이 걸릴 수 있어요.`;
+          compressNote = `영상 줄이기가 안 되어(${String(e?.message || e?.name || '').slice(0, 40)}) 원본(${Math.round(file.size / MB)}MB)을 그대로 올립니다. 시간이 걸릴 수 있어요.`;
         }
       }
       if (!settings?.driveOn && blob.size > MAX_UPLOAD_BYTES) throw new Error(`영상이 너무 큽니다 (${Math.round(blob.size / MB)}MB). "올리기 전에 영상 줄이기"를 켜거나 더 짧게 찍어 주세요.`);
@@ -90,11 +106,12 @@ export default function Upload() {
       if (e?.name === 'AbortError') { setStatus('idle'); setMessage('취소했습니다.'); return; }
       console.error(e);
       setStatus('error');
-      setMessage(e?.message || '올리는 중 문제가 생겼습니다.');
+      if (e?.fileRead) { setMessage(''); setFileProblem(`${e.message}${e.detail ? ` (${e.detail})` : ''}`); }
+      else setMessage(e?.message || '올리는 중 문제가 생겼습니다.');
     }
   };
 
-  const reset = () => { setFile(null); setStatus('idle'); setMessage(''); setResult(null); setInfo((v) => ({ ...v, student1: '', student2: '' })); };
+  const reset = () => { setFileProblem(''); setFile(null); setStatus('idle'); setMessage(''); setResult(null); setInfo((v) => ({ ...v, student1: '', student2: '' })); };
 
   const pick = (field) => (e) => setInfo({ ...info, [field]: e.target.value });
 
@@ -175,10 +192,17 @@ export default function Upload() {
 
               {mode === 'file' && (<>
               <label className={`cb-drop ${busy ? 'is-busy' : ''}`} style={{ marginTop: 12 }}>
-                <input type="file" accept="video/*" onChange={(e) => setFile(e.target.files?.[0] || null)} disabled={busy} />
+                <input type="file" accept="video/*" onChange={(e) => pickFile(e.target.files?.[0])} disabled={busy} />
                 <span>{file ? `📼 ${file.name} (${Math.round(file.size / MB)}MB)` : '여기를 눌러 앨범에서 영상 고르기'}</span>
                 <small>캐치볼하는 두 사람이 옆모습으로 한 화면에 나오게 찍은 영상이어야 합니다.</small>
                 {file && file.size > 100 * MB && <small style={{ color: '#a4262c', fontWeight: 700 }}>영상이 커요({Math.round(file.size / MB)}MB). 줄이는 데 영상 길이만큼, 올리는 데 시간이 더 걸립니다. 와이파이에서 올리거나 "바로 촬영해서 제출"을 쓰면 빠릅니다.</small>}
+              </label>
+
+              {fileProblem && <p className="cb-error" style={{ marginTop: 10 }}>⚠️ {fileProblem}</p>}
+              {/* 갤러리(사진 선택기)가 영상을 못 넘겨줄 때: 영상 말고 다른 종류도 받는다고 하면 폰이 '파일' 앱 선택기를 엶 */}
+              <label className={`cb-file-alt ${busy ? 'is-busy' : ''}`}>
+                <input type="file" accept=".mp4,.mov,.m4v,.webm,.mkv,.3gp,application/octet-stream" onChange={(e) => pickFile(e.target.files?.[0])} disabled={busy} />
+                📂 파일 앱에서 고르기 <span className="cb-sub">(위에서 고른 영상이 안 올라갈 때)</span>
               </label>
 
               {canCompress() && (
@@ -192,14 +216,14 @@ export default function Upload() {
                 <div className="cb-upload-progress">
                   <div className="cb-progress-bar"><div style={{ width: `${Math.round(progress * 100)}%` }} /></div>
                   <div className="cb-progress-text dark">
-                    {status === 'compressing' ? `영상 줄이는 중 ${Math.round(progress * 100)}%` : `${message || '올리는 중'} ${Math.round(progress * 100)}%`}
+                    {status === 'compressing' ? `영상 줄이는 중 ${Math.round(progress * 100)}%` : `${message || '올리는 중'} ${Math.round(progress * 100)}%${file && file.size > 30 * MB && !compress ? ` (${Math.round(progress * file.size / MB)}/${Math.round(file.size / MB)}MB)` : ''}`}
                   </div>
                   <button type="button" className="cb-btn ghost" onClick={() => abortRef.current?.abort()}>취소</button>
                 </div>
               )}
               {!busy && message && <p className={status === 'error' ? 'cb-error' : 'cb-note'}>{message}</p>}
 
-              <button type="button" className="cb-btn big" onClick={start} disabled={busy}>영상 올리기</button>
+              <button type="button" className="cb-btn big" onClick={start} disabled={busy || !!fileProblem}>영상 올리기</button>
               </>)}
             </>
           )}

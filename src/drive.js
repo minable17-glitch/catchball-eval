@@ -51,8 +51,30 @@ export const disconnectDrive = () => callDrive('disconnect');
 
 // ── 학생 업로드 ──
 
+// 폰이 고른 영상 파일을 브라우저에 실제로 넘겨주는지 확인 (갤러리의 클라우드 전용·변환 중 영상은 읽기가 실패함).
+// 읽기 실패는 인터넷 문제와 증상이 같아서(다시 시도해도 계속 실패) 따로 잡아냄.
+export const FILE_READ_HELP = '폰이 이 영상 파일을 넘겨주지 못하고 있어요. ① 아래 "파일 앱에서 고르기"로 다시 골라 보세요. ② 그래도 안 되면 "바로 촬영해서 제출"로 찍어 주세요.';
+async function readPart(blob, start, end) {
+  try {
+    return await blob.slice(start, end).arrayBuffer();
+  } catch (e) {
+    throw Object.assign(new Error(FILE_READ_HELP), { fileRead: true, detail: `읽기 실패 ${e?.name || ''} @${Math.round(start / 1048576)}MB` });
+  }
+}
+/** 고른 파일의 앞·가운데·끝을 조금씩 읽어 봄. 실패하면 fileRead 오류 */
+export async function probeFile(file) {
+  const n = 256 * 1024, size = file.size;
+  if (!size) throw Object.assign(new Error(FILE_READ_HELP), { fileRead: true, detail: '크기 0' });
+  const spots = [0, Math.max(0, Math.floor(size / 2) - n), Math.max(0, size - n)];
+  let got = 0;
+  for (const s of spots) got += (await readPart(file, s, Math.min(size, s + n))).byteLength;
+  if (!got) throw Object.assign(new Error(FILE_READ_HELP), { fileRead: true, detail: '빈 파일' });
+}
+
 // 드라이브 이어 올리기 주소로 영상 전체를 한 번에 PUT (진행률 표시)
-function putDirect(uploadUrl, blob, onProgress) {
+async function putDirect(uploadUrl, blob, onProgress) {
+  // 작은 영상은 메모리로 읽은 뒤 보냄 (파일 읽기 실패와 인터넷 실패를 구분하려고). 큰 파일은 그대로 흘려 보냄
+  const body = blob.size <= SINGLE_PUT_MAX ? await readPart(blob, 0, blob.size) : blob;
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('PUT', uploadUrl, true);
@@ -68,7 +90,7 @@ function putDirect(uploadUrl, blob, onProgress) {
     xhr.onerror = () => reject(new Error('드라이브에 바로 올리지 못했습니다.'));
     xhr.ontimeout = () => reject(new Error('드라이브 업로드 시간 초과'));
     xhr.timeout = 10 * 60 * 1000;
-    xhr.send(blob);
+    xhr.send(body);
   });
 }
 
@@ -77,7 +99,8 @@ const DIRECT_CHUNK = 8 * 1024 * 1024; // 큰 영상은 8MB 조각으로 (256KB �
 const SINGLE_PUT_MAX = 24 * 1024 * 1024; // 이보다 작으면 한 번에
 
 // 조각 하나 보내기 → { done, file } 또는 { done:false, next }
-function putChunk(uploadUrl, blob, start, end, total, onProgress) {
+async function putChunk(uploadUrl, blob, start, end, total, onProgress) {
+  const body = end > start ? await readPart(blob, start, end) : null; // 조각을 먼저 읽음: 읽기 실패면 fileRead 오류
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('PUT', uploadUrl, true);
@@ -95,7 +118,7 @@ function putChunk(uploadUrl, blob, start, end, total, onProgress) {
     xhr.onerror = () => reject(Object.assign(new Error('인터넷 연결이 끊겼습니다.'), { network: true }));
     xhr.ontimeout = () => reject(Object.assign(new Error('드라이브 업로드 시간 초과'), { network: true }));
     xhr.timeout = 5 * 60 * 1000;
-    xhr.send(end > start ? blob.slice(start, end) : null);
+    xhr.send(body);
   });
 }
 
@@ -111,8 +134,9 @@ async function putDirectChunked(uploadUrl, blob, onProgress, onStatus) {
       offset = r.next ?? end;
       failures = 0;
     } catch (e) {
+      if (e.fileRead) throw e; // 파일을 못 읽는 것은 다시 해도 소용없음
       if (offset === 0 && !e.network) throw e; // 처음부터 막히면(브라우저가 막음 등) 다른 길로
-      if (++failures > 5) throw e;
+      if (++failures > (offset === 0 ? 2 : 5)) throw e; // 한 조각도 못 보냈으면 오래 끌지 않고 다른 길로
       onStatus?.(`연결이 끊겨 다시 시도하는 중... (${failures}/5)`);
       await sleep(2000 * failures);
       try {
@@ -138,14 +162,14 @@ async function putRelay(uploadUrl, blob, onProgress, onStatus) {
         const res = await fetch(`${FN_URL}?action=relay&session=${encodeURIComponent(uploadUrl)}`, {
           method: 'POST',
           headers: { ...(await authHeaders()), 'Content-Type': 'application/octet-stream', 'Content-Range': `bytes ${start}-${end - 1}/${total}` },
-          body: blob.slice(start, end),
+          body: await readPart(blob, start, end),
         });
         const r = await readResult(res);
         onProgress?.(end / total);
         if (r.done) return r.file;
         break;
       } catch (e) {
-        if (attempt >= 4) throw e;
+        if (e.fileRead || attempt >= 4) throw e;
         onStatus?.(`연결이 끊겨 다시 시도하는 중... (${attempt}/3)`);
         await sleep(2000 * attempt);
       }
@@ -166,13 +190,14 @@ export async function uploadToDrive({ info, blob, fileName, onStatus, onProgress
     else {
       try { file = await putDirectChunked(start.uploadUrl, blob, onProgress, onStatus); }
       catch (e) {
-        if (e.network) throw e;
+        if (e.network || e.fileRead) throw e;
         // 조각 보내기가 처음부터 막히는 브라우저: 한 번에 보내기
         start = await callDrive('start_upload', { ...meta, origin: window.location.origin });
         file = await putDirect(start.uploadUrl, blob, onProgress);
       }
     }
   } catch (e) {
+    if (e.fileRead) throw e;
     console.warn('드라이브 직접 업로드 실패, 함수를 거쳐 다시 시도', e);
     route = 'relay';
     onStatus?.('다른 길로 올리는 중... (조금 더 걸립니다)');

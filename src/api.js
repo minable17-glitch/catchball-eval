@@ -143,6 +143,7 @@ export async function submitVideo({ info, blob, fileName, durationSec = null, pl
       path = 'drive:' + driveFileId;
       storage = 'drive';
     } catch (e) {
+      if (e.fileRead) throw e; // 폰이 파일을 넘겨주지 않는 경우: 다른 저장소로 보내도 똑같이 실패
       // 두 번째 길: 드라이브가 안 되면 수파베이스 저장소에 (영상을 잃지 않게)
       console.warn('드라이브 저장 실패, 수파베이스 저장소로 올립니다', e);
       if (blob.size > MAX_UPLOAD_BYTES) {

@@ -196,3 +196,7 @@ input[type="range"] { width: 100%; accent-color: var(--cb-accent-dark); }
 .cb-round-pick .cb-mode { grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); }
 .cb-round-pick .cb-mode button { font-size: 1rem; padding: 12px 6px; }
 .cb-round-pick .cb-mode button.on { background: var(--cb-accent); color: #2b2000; }
+
+.cb-file-alt { position: relative; display: block; margin-top: 8px; padding: 10px 12px; border: 1px solid var(--cb-line); border-radius: 10px; background: #fff; font-size: 0.92rem; color: var(--cb-text); cursor: pointer; flex-direction: row; }
+.cb-file-alt input { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; }
+.cb-file-alt.is-busy { opacity: 0.6; }
